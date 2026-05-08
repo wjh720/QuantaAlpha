@@ -126,7 +126,8 @@ class FactorFBWorkspace(FBWorkspace):
                 raise CodeFormatError(self.FB_CODE_NOT_SET)
             else:
                 return self.FB_CODE_NOT_SET, None
-        with FileLock(self.workspace_path / "execution.lock"):
+        workspace_path = self.workspace_path.absolute()
+        with FileLock(workspace_path / "execution.lock"):
             # Set data path for all versions
             source_data_path = (
                 Path(
@@ -140,16 +141,16 @@ class FactorFBWorkspace(FBWorkspace):
 
             # Use absolute path
             if not source_data_path.is_absolute():
-                source_data_path = self.workspace_path.parent.parent.parent / source_data_path
+                source_data_path = workspace_path.parent.parent.parent / source_data_path
             else:
                 source_data_path = Path(source_data_path).absolute()
 
             source_data_path.mkdir(exist_ok=True, parents=True)
-            code_path = self.workspace_path / f"factor.py"
+            code_path = workspace_path / "factor.py"
 
             # Ensure data path exists and has files
             if source_data_path.exists() and any(source_data_path.iterdir()):
-                self.link_all_files_in_folder_to_workspace(source_data_path, self.workspace_path)
+                self.link_all_files_in_folder_to_workspace(source_data_path, workspace_path)
             else:
                 from quantaalpha.log import logger
                 logger.warning(f"Data folder {source_data_path} does not exist or is empty. Skipping linking.")
@@ -161,7 +162,7 @@ class FactorFBWorkspace(FBWorkspace):
             if self.target_task.version == 1:
                 execution_code_path = code_path
             elif self.target_task.version == 2:
-                execution_code_path = self.workspace_path / f"{uuid.uuid4()}.py"
+                execution_code_path = workspace_path / f"{uuid.uuid4()}.py"
                 execution_code_path.write_text((Path(__file__).parent / "factor_execution_template.txt").read_text())
 
             try:
@@ -178,7 +179,7 @@ class FactorFBWorkspace(FBWorkspace):
                 subprocess.check_output(
                     f"{FACTOR_COSTEER_SETTINGS.python_bin} {execution_code_path}",
                     shell=True,
-                    cwd=self.workspace_path,
+                    cwd=workspace_path,
                     stderr=subprocess.STDOUT,
                     timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,
                     env=env,
@@ -207,7 +208,7 @@ class FactorFBWorkspace(FBWorkspace):
                 else:
                     execution_error = CustomRuntimeError(execution_feedback)
 
-            workspace_output_file_path = self.workspace_path / "result.h5"
+            workspace_output_file_path = workspace_path / "result.h5"
             if workspace_output_file_path.exists() and execution_success:
                 try:
                     executed_factor_value_dataframe = pd.read_hdf(workspace_output_file_path)
