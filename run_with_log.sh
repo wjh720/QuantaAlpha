@@ -21,7 +21,7 @@ LOG_FILE="logs/run_${TIMESTAMP}_${DIRECTION_SLUG}.log"
 echo "Log file: ${LOG_FILE}"
 
 if [ $# -ge 2 ]; then
-    ./run.sh "$1" "$2" 2>&1 | tee "${LOG_FILE}"
+    ./run.sh "$1" "$2" > "${LOG_FILE}" 2>&1
 else
-    ./run.sh "$1" 2>&1 | tee "${LOG_FILE}"
+    ./run.sh "$1" > "${LOG_FILE}" 2>&1
 fi
