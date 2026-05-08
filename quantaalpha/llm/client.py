@@ -534,6 +534,24 @@ class APIBackend:
                     logger.error(f"Failed to get encoder even after patching with {patch_func.__name__}")
                     raise
 
+    def _truncate_embedding_inputs(self, input_content_list: list[str]) -> list[str]:
+        max_length = LLM_SETTINGS.embedding_max_length
+        if max_length <= 0:
+            return input_content_list
+
+        try:
+            encoder = tiktoken.encoding_for_model(self.embedding_model) if self.embedding_model else self._get_encoder()
+        except Exception:  # noqa: BLE001
+            encoder = tiktoken.get_encoding("cl100k_base")
+
+        truncated_input_content_list = []
+        for content in input_content_list:
+            tokens = encoder.encode(content)
+            if len(tokens) > max_length:
+                content = encoder.decode(tokens[:max_length])
+            truncated_input_content_list.append(content)
+        return truncated_input_content_list
+
     def build_chat_session(
         self,
         conversation_id: str | None = None,
@@ -689,6 +707,8 @@ class APIBackend:
                     filtered_input_content_list.append(content)
         else:
             filtered_input_content_list = input_content_list
+
+        filtered_input_content_list = self._truncate_embedding_inputs(filtered_input_content_list)
 
         if len(filtered_input_content_list) > 0:
             # Adjust batch size by model (DashScope text-embedding-v4 is slower)
