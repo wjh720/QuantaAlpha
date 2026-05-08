@@ -139,11 +139,9 @@ class FactorFBWorkspace(FBWorkspace):
                 )
             )
 
-            project_root = Path(__file__).parent.parent.parent.parent.parent
-
             # Use absolute path
             if not source_data_path.is_absolute():
-                source_data_path = project_root / source_data_path
+                source_data_path = workspace_path.parent.parent.parent / source_data_path
             else:
                 source_data_path = Path(source_data_path).absolute()
 
@@ -171,6 +169,7 @@ class FactorFBWorkspace(FBWorkspace):
                 # Set PYTHONPATH to include the project root so quantaalpha can be imported
                 import os
                 env = os.environ.copy()
+                project_root = Path(__file__).parent.parent.parent.parent.parent
                 pythonpath = str(project_root)
                 if 'PYTHONPATH' in env:
                     env['PYTHONPATH'] = pythonpath + ':' + env['PYTHONPATH']
