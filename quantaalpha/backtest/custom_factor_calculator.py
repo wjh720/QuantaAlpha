@@ -217,9 +217,9 @@ class CustomFactorCalculator:
             finally:
                 _sys.stdout = old_stdout
             
-            for col in df.columns:
+            for col in sorted(df.columns, key=len, reverse=True):
                 if col.startswith('$'):
-                    expr = expr.replace(col[1:], f"df['{col}']")
+                    expr = expr.replace(col, f"df['{col}']")
             
             exec_globals = {
                 'df': df,
@@ -529,9 +529,9 @@ class CustomFactorDataLoader:
         expr = parse_symbol(self.label_expr, df.columns)
         expr = parse_expression(expr)
         
-        for col in df.columns:
+        for col in sorted(df.columns, key=len, reverse=True):
             if col.startswith('$'):
-                expr = expr.replace(col[1:], f"df['{col}']")
+                expr = expr.replace(col, f"df['{col}']")
         
         exec_globals = {'df': df, 'np': np, 'pd': pd}
         for name in dir(func_lib):

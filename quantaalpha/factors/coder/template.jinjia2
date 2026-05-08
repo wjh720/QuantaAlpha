@@ -13,9 +13,10 @@ def calculate_factor(expr: str, name: str):
     expr = parse_symbol(expr, df.columns)
     expr = parse_expression(expr)
 
-    # replace '$var' by 'df['var'] to extract var's actual values
-    for col in df.columns:
-        expr = expr.replace(col[1:], f"df[\'{col}\']")
+    # replace '$var' by 'df['$var']' to extract the actual series
+    for col in sorted(df.columns, key=len, reverse=True):
+        if col.startswith('$'):
+            expr = expr.replace(col, f"df[\'{col}\']")
 
     df[name] = eval(expr)
     result = df[name].astype(np.float64)

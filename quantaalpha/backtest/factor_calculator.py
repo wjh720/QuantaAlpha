@@ -187,9 +187,9 @@ Only the following operations are allowed in expressions:
             parsed_expr = parse_symbol(expr, df.columns)
             parsed_expr = parse_expression(parsed_expr)
             
-            for col in df.columns:
+            for col in sorted(df.columns, key=len, reverse=True):
                 if col.startswith('$'):
-                    parsed_expr = parsed_expr.replace(col[1:], f"df['{col}']")
+                    parsed_expr = parsed_expr.replace(col, f"df['{col}']")
             
             exec_globals = {
                 'df': df,
@@ -405,4 +405,3 @@ class QlibDataProvider:
         logger.info(f"Loaded stock data: {len(df)} rows")
         
         return df
-
