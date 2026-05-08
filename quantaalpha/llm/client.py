@@ -756,21 +756,43 @@ class APIBackend:
                 # DashScope embedding: smaller batch (silent)
             
             batch_wait_seconds = LLM_SETTINGS.embedding_batch_wait_seconds
-            batches = [
-                chunked_input_content_list[i : i + batch_size]
-                for i in range(0, len(chunked_input_content_list), batch_size)
-            ]
+            flat_chunk_lengths = [length for lengths in chunk_lengths_by_content for length in lengths]
+            batch_token_limit = LLM_SETTINGS.embedding_max_length
+            batches = []
+            batch_length_slices = []
+            current_batch = []
+            current_lengths = []
+            current_batch_tokens = 0
+
+            for content, chunk_len in zip(chunked_input_content_list, flat_chunk_lengths):
+                if current_batch and (
+                    len(current_batch) >= batch_size
+                    or current_batch_tokens + chunk_len > batch_token_limit
+                ):
+                    batches.append(current_batch)
+                    batch_length_slices.append(current_lengths)
+                    current_batch = []
+                    current_lengths = []
+                    current_batch_tokens = 0
+
+                current_batch.append(content)
+                current_lengths.append(chunk_len)
+                current_batch_tokens += chunk_len
+
+            if current_batch:
+                batches.append(current_batch)
+                batch_length_slices.append(current_lengths)
 
             chunk_embeddings = []
-            for batch_idx, sliced_filtered_input_content_list in enumerate(batches):
-                batch_chunk_lengths = [
-                    len(self._get_embedding_encoder().encode(content)) for content in sliced_filtered_input_content_list
-                ]
+            for batch_idx, (sliced_filtered_input_content_list, batch_chunk_lengths) in enumerate(
+                zip(batches, batch_length_slices)
+            ):
                 logger.info(
                     "Embedding batch stats: "
                     f"batch_index={batch_idx}, "
                     f"batch_size={len(sliced_filtered_input_content_list)}, "
-                    f"max_batch_chunk_tokens={max(batch_chunk_lengths, default=0)}"
+                    f"max_batch_chunk_tokens={max(batch_chunk_lengths, default=0)}, "
+                    f"total_batch_tokens={sum(batch_chunk_lengths)}"
                 )
                 if self.use_azure:
                     response = self.embedding_client.embeddings.create(
