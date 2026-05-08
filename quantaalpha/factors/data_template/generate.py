@@ -1,7 +1,11 @@
+import os
+from pathlib import Path
+
 import qlib
 
-import os
-_provider = os.environ.get("QLIB_DATA_DIR", os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data"))
+_provider = Path(
+    os.environ.get("QLIB_DATA_DIR", os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data"))
+).expanduser().resolve()
 qlib.init(provider_uri=_provider)
 from qlib.data import D
 
