@@ -43,7 +43,7 @@ class LLMSettings(ExtendedBaseSettings):
     # Embedding
     embedding_openai_api_key: str = ""
     embedding_model: str = ""
-    embedding_max_length: int = 500
+    embedding_max_length: int = 400
     embedding_max_str_num: int = 3
     embedding_batch_wait_seconds: float = 2.0
     embedding_api_key: str = ""
