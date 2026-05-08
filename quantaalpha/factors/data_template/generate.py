@@ -5,7 +5,11 @@ import qlib
 
 _provider = Path(
     os.environ.get("QLIB_DATA_DIR", os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data"))
-).expanduser().resolve()
+).expanduser()
+if not _provider.is_absolute():
+    project_root = Path(__file__).resolve().parents[3]
+    _provider = project_root / _provider
+_provider = _provider.resolve()
 qlib.init(provider_uri=_provider)
 from qlib.data import D
 
