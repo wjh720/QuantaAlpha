@@ -732,22 +732,6 @@ class APIBackend:
                 original_token_lengths,
             ) = self._chunk_embedding_inputs(filtered_input_content_list)
 
-            max_original_tokens = max(original_token_lengths, default=0)
-            max_chunk_tokens = max((max(lengths) for lengths in chunk_lengths_by_content), default=0)
-            logger.info(
-                "Embedding input stats: "
-                f"items={len(filtered_input_content_list)}, "
-                f"max_original_tokens={max_original_tokens}, "
-                f"max_chunk_tokens={max_chunk_tokens}, "
-                f"chunk_limit={LLM_SETTINGS.embedding_max_length}, "
-                f"total_chunks={len(chunked_input_content_list)}"
-            )
-            if max_chunk_tokens >= 512:
-                logger.warning(
-                    "Embedding chunk token length is still too large before request: "
-                    f"max_chunk_tokens={max_chunk_tokens}"
-                )
-
             # Adjust batch size by model (DashScope text-embedding-v4 is slower)
             batch_size = LLM_SETTINGS.embedding_max_str_num
             if self.embedding_model and ("qwen" in self.embedding_model.lower() or "text-embedding-v4" in self.embedding_model.lower()):
@@ -787,13 +771,6 @@ class APIBackend:
             for batch_idx, (sliced_filtered_input_content_list, batch_chunk_lengths) in enumerate(
                 zip(batches, batch_length_slices)
             ):
-                logger.info(
-                    "Embedding batch stats: "
-                    f"batch_index={batch_idx}, "
-                    f"batch_size={len(sliced_filtered_input_content_list)}, "
-                    f"max_batch_chunk_tokens={max(batch_chunk_lengths, default=0)}, "
-                    f"total_batch_tokens={sum(batch_chunk_lengths)}"
-                )
                 if self.use_azure:
                     response = self.embedding_client.embeddings.create(
                         model=self.embedding_model,
