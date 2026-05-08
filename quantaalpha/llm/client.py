@@ -540,17 +540,21 @@ class APIBackend:
         except Exception:  # noqa: BLE001
             return tiktoken.get_encoding("cl100k_base")
 
-    def _chunk_embedding_inputs(self, input_content_list: list[str]) -> tuple[list[str], list[list[int]]]:
+    def _chunk_embedding_inputs(
+        self, input_content_list: list[str]
+    ) -> tuple[list[str], list[list[int]], list[int]]:
         max_length = LLM_SETTINGS.embedding_max_length
         if max_length <= 0:
-            return input_content_list, [[1] for _ in input_content_list]
+            return input_content_list, [[1] for _ in input_content_list], [1 for _ in input_content_list]
 
         encoder = self._get_embedding_encoder()
         chunked_input_content_list = []
         chunk_lengths_by_content = []
+        original_token_lengths = []
 
         for content in input_content_list:
             tokens = encoder.encode(content)
+            original_token_lengths.append(len(tokens))
             if len(tokens) <= max_length:
                 chunked_input_content_list.append(content)
                 chunk_lengths_by_content.append([max(len(tokens), 1)])
@@ -563,7 +567,7 @@ class APIBackend:
                 chunk_lengths.append(len(chunk_tokens))
             chunk_lengths_by_content.append(chunk_lengths)
 
-        return chunked_input_content_list, chunk_lengths_by_content
+        return chunked_input_content_list, chunk_lengths_by_content, original_token_lengths
 
     def build_chat_session(
         self,
@@ -722,7 +726,27 @@ class APIBackend:
             filtered_input_content_list = input_content_list
 
         if len(filtered_input_content_list) > 0:
-            chunked_input_content_list, chunk_lengths_by_content = self._chunk_embedding_inputs(filtered_input_content_list)
+            (
+                chunked_input_content_list,
+                chunk_lengths_by_content,
+                original_token_lengths,
+            ) = self._chunk_embedding_inputs(filtered_input_content_list)
+
+            max_original_tokens = max(original_token_lengths, default=0)
+            max_chunk_tokens = max((max(lengths) for lengths in chunk_lengths_by_content), default=0)
+            logger.info(
+                "Embedding input stats: "
+                f"items={len(filtered_input_content_list)}, "
+                f"max_original_tokens={max_original_tokens}, "
+                f"max_chunk_tokens={max_chunk_tokens}, "
+                f"chunk_limit={LLM_SETTINGS.embedding_max_length}, "
+                f"total_chunks={len(chunked_input_content_list)}"
+            )
+            if max_chunk_tokens >= 512:
+                logger.warning(
+                    "Embedding chunk token length is still too large before request: "
+                    f"max_chunk_tokens={max_chunk_tokens}"
+                )
 
             # Adjust batch size by model (DashScope text-embedding-v4 is slower)
             batch_size = LLM_SETTINGS.embedding_max_str_num
@@ -739,6 +763,15 @@ class APIBackend:
 
             chunk_embeddings = []
             for batch_idx, sliced_filtered_input_content_list in enumerate(batches):
+                batch_chunk_lengths = [
+                    len(self._get_embedding_encoder().encode(content)) for content in sliced_filtered_input_content_list
+                ]
+                logger.info(
+                    "Embedding batch stats: "
+                    f"batch_index={batch_idx}, "
+                    f"batch_size={len(sliced_filtered_input_content_list)}, "
+                    f"max_batch_chunk_tokens={max(batch_chunk_lengths, default=0)}"
+                )
                 if self.use_azure:
                     response = self.embedding_client.embeddings.create(
                         model=self.embedding_model,
