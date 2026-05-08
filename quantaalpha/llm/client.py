@@ -534,23 +534,36 @@ class APIBackend:
                     logger.error(f"Failed to get encoder even after patching with {patch_func.__name__}")
                     raise
 
-    def _truncate_embedding_inputs(self, input_content_list: list[str]) -> list[str]:
+    def _get_embedding_encoder(self):
+        try:
+            return tiktoken.encoding_for_model(self.embedding_model) if self.embedding_model else self._get_encoder()
+        except Exception:  # noqa: BLE001
+            return tiktoken.get_encoding("cl100k_base")
+
+    def _chunk_embedding_inputs(self, input_content_list: list[str]) -> tuple[list[str], list[list[int]]]:
         max_length = LLM_SETTINGS.embedding_max_length
         if max_length <= 0:
-            return input_content_list
+            return input_content_list, [[1] for _ in input_content_list]
 
-        try:
-            encoder = tiktoken.encoding_for_model(self.embedding_model) if self.embedding_model else self._get_encoder()
-        except Exception:  # noqa: BLE001
-            encoder = tiktoken.get_encoding("cl100k_base")
+        encoder = self._get_embedding_encoder()
+        chunked_input_content_list = []
+        chunk_lengths_by_content = []
 
-        truncated_input_content_list = []
         for content in input_content_list:
             tokens = encoder.encode(content)
-            if len(tokens) > max_length:
-                content = encoder.decode(tokens[:max_length])
-            truncated_input_content_list.append(content)
-        return truncated_input_content_list
+            if len(tokens) <= max_length:
+                chunked_input_content_list.append(content)
+                chunk_lengths_by_content.append([max(len(tokens), 1)])
+                continue
+
+            chunk_lengths = []
+            for start in range(0, len(tokens), max_length):
+                chunk_tokens = tokens[start : start + max_length]
+                chunked_input_content_list.append(encoder.decode(chunk_tokens))
+                chunk_lengths.append(len(chunk_tokens))
+            chunk_lengths_by_content.append(chunk_lengths)
+
+        return chunked_input_content_list, chunk_lengths_by_content
 
     def build_chat_session(
         self,
@@ -708,9 +721,9 @@ class APIBackend:
         else:
             filtered_input_content_list = input_content_list
 
-        filtered_input_content_list = self._truncate_embedding_inputs(filtered_input_content_list)
-
         if len(filtered_input_content_list) > 0:
+            chunked_input_content_list, chunk_lengths_by_content = self._chunk_embedding_inputs(filtered_input_content_list)
+
             # Adjust batch size by model (DashScope text-embedding-v4 is slower)
             batch_size = LLM_SETTINGS.embedding_max_str_num
             if self.embedding_model and ("qwen" in self.embedding_model.lower() or "text-embedding-v4" in self.embedding_model.lower()):
@@ -720,10 +733,11 @@ class APIBackend:
             
             batch_wait_seconds = LLM_SETTINGS.embedding_batch_wait_seconds
             batches = [
-                filtered_input_content_list[i : i + batch_size]
-                for i in range(0, len(filtered_input_content_list), batch_size)
+                chunked_input_content_list[i : i + batch_size]
+                for i in range(0, len(chunked_input_content_list), batch_size)
             ]
-            
+
+            chunk_embeddings = []
             for batch_idx, sliced_filtered_input_content_list in enumerate(batches):
                 if self.use_azure:
                     response = self.embedding_client.embeddings.create(
@@ -735,15 +749,29 @@ class APIBackend:
                         model=self.embedding_model,
                         input=sliced_filtered_input_content_list,
                     )
-                for index, data in enumerate(response.data):
-                    content_to_embedding_dict[sliced_filtered_input_content_list[index]] = data.embedding
+                for data in response.data:
+                    chunk_embeddings.append(data.embedding)
 
-                if self.dump_embedding_cache:
-                    self.cache.embedding_set(content_to_embedding_dict)
-                
                 # Wait between batches to avoid API overload
                 if batch_idx < len(batches) - 1 and batch_wait_seconds > 0:
                     time.sleep(batch_wait_seconds)
+
+            chunk_index = 0
+            for content, chunk_lengths in zip(filtered_input_content_list, chunk_lengths_by_content):
+                content_chunk_embeddings = chunk_embeddings[chunk_index : chunk_index + len(chunk_lengths)]
+                chunk_index += len(chunk_lengths)
+
+                if len(content_chunk_embeddings) == 1:
+                    aggregated_embedding = content_chunk_embeddings[0]
+                else:
+                    weights = np.asarray(chunk_lengths, dtype=float)
+                    embeddings_array = np.asarray(content_chunk_embeddings, dtype=float)
+                    aggregated_embedding = np.average(embeddings_array, axis=0, weights=weights).tolist()
+
+                content_to_embedding_dict[content] = aggregated_embedding
+
+            if self.dump_embedding_cache:
+                self.cache.embedding_set(content_to_embedding_dict)
         return [content_to_embedding_dict[content] for content in input_content_list]
 
     def _build_log_messages(self, messages: list[dict], max_prompt_length: int = 100) -> str:
