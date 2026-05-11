@@ -52,6 +52,25 @@ class BacktestRunner:
         logger.info(f"Qlib initialized: {provider_uri} (region={region})")
 
     @staticmethod
+    def _looks_like_datetime_level(values: pd.Index) -> bool:
+        """Heuristically determine whether an index level contains datetimes."""
+        if pd.api.types.is_datetime64_any_dtype(values):
+            return True
+        if len(values) == 0:
+            return False
+
+        sample = pd.Index(values).dropna().unique()[:20]
+        if len(sample) == 0:
+            return False
+
+        try:
+            parsed = pd.to_datetime(sample, errors="coerce")
+        except Exception:
+            return False
+
+        return parsed.notna().mean() >= 0.8
+
+    @staticmethod
     def _normalize_datetime_instrument_index(obj):
         """Normalize a 2-level MultiIndex to (datetime, instrument)."""
         if not hasattr(obj, "index") or not isinstance(obj.index, pd.MultiIndex) or obj.index.nlevels != 2:
@@ -62,13 +81,21 @@ class BacktestRunner:
         level0 = index.get_level_values(0)
         level1 = index.get_level_values(1)
 
-        level0_is_dt = pd.api.types.is_datetime64_any_dtype(level0)
-        level1_is_dt = pd.api.types.is_datetime64_any_dtype(level1)
+        level0_is_dt = BacktestRunner._looks_like_datetime_level(level0)
+        level1_is_dt = BacktestRunner._looks_like_datetime_level(level1)
 
         if names == ["instrument", "datetime"] or (not level0_is_dt and level1_is_dt):
             index = index.swaplevel()
             level0 = index.get_level_values(0)
             level1 = index.get_level_values(1)
+            level0_is_dt = BacktestRunner._looks_like_datetime_level(level0)
+
+        if not level0_is_dt:
+            raise ValueError(
+                f"Failed to identify datetime level in MultiIndex names={names}, "
+                f"sample_level0={list(pd.Index(level0).dropna().unique()[:3])}, "
+                f"sample_level1={list(pd.Index(level1).dropna().unique()[:3])}"
+            )
 
         if not pd.api.types.is_datetime64_any_dtype(level0):
             level0 = pd.to_datetime(level0)

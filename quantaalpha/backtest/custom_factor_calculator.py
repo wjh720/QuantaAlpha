@@ -162,8 +162,25 @@ class CustomFactorCalculator:
         level0 = index.get_level_values(0)
         level1 = index.get_level_values(1)
 
-        level0_is_dt = is_datetime64_any_dtype(level0)
-        level1_is_dt = is_datetime64_any_dtype(level1)
+        def _looks_like_datetime_level(values: pd.Index) -> bool:
+            if is_datetime64_any_dtype(values):
+                return True
+            if len(values) == 0:
+                return False
+
+            sample = pd.Index(values).dropna().unique()[:20]
+            if len(sample) == 0:
+                return False
+
+            try:
+                parsed = pd.to_datetime(sample, errors="coerce")
+            except Exception:
+                return False
+
+            return parsed.notna().mean() >= 0.8
+
+        level0_is_dt = _looks_like_datetime_level(level0)
+        level1_is_dt = _looks_like_datetime_level(level1)
 
         # Cached H5 files may have unnamed reversed MultiIndex: (instrument, datetime).
         if (names == ['instrument', 'datetime']) or (not level0_is_dt and level1_is_dt):
@@ -171,8 +188,16 @@ class CustomFactorCalculator:
             names = list(index.names)
             level0 = index.get_level_values(0)
             level1 = index.get_level_values(1)
+            level0_is_dt = _looks_like_datetime_level(level0)
 
         # Normalize datetime level dtype when stored as object/string.
+        if not level0_is_dt:
+            raise ValueError(
+                f"Failed to identify datetime level in cached index names={names}, "
+                f"sample_level0={list(pd.Index(level0).dropna().unique()[:3])}, "
+                f"sample_level1={list(pd.Index(level1).dropna().unique()[:3])}"
+            )
+
         if not is_datetime64_any_dtype(level0):
             try:
                 dt_level = pd.to_datetime(level0)
