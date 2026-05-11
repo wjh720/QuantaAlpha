@@ -262,7 +262,7 @@ class FactorLoader:
         """
         Returns: (qlib_compatible_factors {name: expression}, custom_factors list).
         """
-        source_type = self.factor_source_config.get('type', 'alpha158')
+        source_type = self.factor_source_config.get('type', 'alpha158_20')
         
         logger.debug(f"Loading factor source: {source_type}")
         
@@ -387,7 +387,7 @@ class FactorLoader:
     def _load_combined_factors(self) -> Tuple[Dict[str, str], List[Dict]]:
         """Load combined factors (official + custom)."""
         combined_config = self.factor_source_config.get('combined', {})
-        official_source = combined_config.get('official_source', 'alpha158')
+        official_source = combined_config.get('official_source', 'alpha158_20')
         include_custom = combined_config.get('include_custom', True)
         
         if official_source == 'alpha158':
@@ -501,7 +501,7 @@ class FactorLoader:
     
     def get_factor_info(self) -> Dict[str, Any]:
         """Return factor source summary."""
-        source_type = self.factor_source_config.get('type', 'alpha158')
+        source_type = self.factor_source_config.get('type', 'alpha158_20')
         
         if source_type == 'alpha158':
             return {
@@ -532,3 +532,4 @@ class FactorLoader:
                 'type': source_type,
                 'description': 'Unknown factor source'
             }
+
