@@ -456,11 +456,11 @@ class CustomFactorCalculator:
         reference_index = None
         
         for name, series in results.items():
-            if reference_index is None:
-                reference_index = series.index
             validated = self._validate_and_align_result(series, name, reference_index)
             if validated is not None:
                 aligned_results[name] = validated
+                if reference_index is None:
+                    reference_index = validated.index
         
         if aligned_results:
             result_df = pd.DataFrame(aligned_results)
