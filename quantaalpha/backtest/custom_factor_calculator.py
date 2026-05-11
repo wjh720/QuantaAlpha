@@ -481,7 +481,15 @@ class CustomFactorCalculator:
         reference_index = None
         
         for name, series in results.items():
-            validated = self._validate_and_align_result(series, name, reference_index)
+            if reference_index is None:
+                validated = self._validate_and_align_result(
+                    series,
+                    name,
+                    reference_index=None,
+                    allow_data_fallback=False,
+                )
+            else:
+                validated = self._validate_and_align_result(series, name, reference_index)
             if validated is not None:
                 aligned_results[name] = validated
                 if reference_index is None:
@@ -494,20 +502,23 @@ class CustomFactorCalculator:
         
         return pd.DataFrame()
     
-    def _validate_and_align_result(self, result: pd.Series, factor_name: str, 
-                                    reference_index: Optional[pd.Index] = None) -> Optional[pd.Series]:
+    def _validate_and_align_result(self, result: pd.Series, factor_name: str,
+                                    reference_index: Optional[pd.Index] = None,
+                                    allow_data_fallback: bool = True) -> Optional[pd.Series]:
         """Validate and align cached result index."""
         if result is None:
             return None
-        
+
+        result.index = self._normalize_index(result.index)
+
         target_idx = reference_index
-        if target_idx is None:
+        if target_idx is None and allow_data_fallback:
             try:
                 target_idx = self._normalize_index(self.data_df.index)
             except Exception:
                 return result if len(result) > 0 and not result.isna().all() else None
-
-        result.index = self._normalize_index(result.index)
+        elif target_idx is None:
+            return result if len(result) > 0 and not result.isna().all() else None
         
         # Align index (duplicate-safe)
         if not result.index.equals(target_idx):
@@ -578,6 +589,8 @@ class CustomFactorDataLoader:
 
 def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
     """Load stock data from Qlib."""
+    import time
+
     import qlib
     from qlib.data import D
     
@@ -600,10 +613,22 @@ def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
     start_time = data_config.get('start_time', '2016-01-01')
     end_time = data_config.get('end_time', '2025-12-31')
     market = data_config.get('market', 'csi300')
-    
+
+    print(
+        f"  Loading Qlib stock data: market={market}, range={start_time}~{end_time}, region={region}"
+    )
+
+    t0 = time.time()
+    print(f"  [1/2] Resolving instruments for market={market} ...", flush=True)
     stock_list = D.instruments(market)
-    
+    print(f"  [1/2] Instruments resolved in {time.time() - t0:.1f}s", flush=True)
+
     fields = ['$open', '$high', '$low', '$close', '$volume', '$vwap']
+    t1 = time.time()
+    print(
+        f"  [2/2] Loading features {fields} for {market} from {start_time} to {end_time} ...",
+        flush=True,
+    )
     df = D.features(
         stock_list,
         fields,
@@ -611,11 +636,16 @@ def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
         end_time=end_time,
         freq='day'
     )
-    
+    print(
+        f"  [2/2] Features loaded in {time.time() - t1:.1f}s, rows={len(df)}",
+        flush=True,
+    )
+
     df.columns = fields
-    
+
+    print(f"  Stock data ready in {time.time() - t0:.1f}s", flush=True)
     logger.debug(f"Loaded stock data: {len(df)} rows")
-    
+
     return df
 
 
