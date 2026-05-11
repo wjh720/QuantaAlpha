@@ -52,23 +52,18 @@ class BacktestRunner:
         logger.info(f"Qlib initialized: {provider_uri} (region={region})")
 
     @staticmethod
-    def _looks_like_datetime_level(values: pd.Index) -> bool:
-        """Heuristically determine whether an index level contains datetimes."""
+    def _datetime_parse_ratio(values: pd.Index) -> tuple[float, Optional[pd.Index]]:
+        """Return datetime parse success ratio and parsed values when possible."""
         if pd.api.types.is_datetime64_any_dtype(values):
-            return True
+            return 1.0, values
         if len(values) == 0:
-            return False
-
-        sample = pd.Index(values).dropna().unique()[:20]
-        if len(sample) == 0:
-            return False
-
+            return 0.0, None
         try:
-            parsed = pd.to_datetime(sample, errors="coerce")
+            parsed = pd.to_datetime(values, errors="coerce")
         except Exception:
-            return False
-
-        return parsed.notna().mean() >= 0.8
+            return 0.0, None
+        ratio = float(pd.Series(parsed).notna().mean())
+        return ratio, parsed
 
     @staticmethod
     def _normalize_datetime_instrument_index(obj):
@@ -81,27 +76,41 @@ class BacktestRunner:
         level0 = index.get_level_values(0)
         level1 = index.get_level_values(1)
 
-        level0_is_dt = BacktestRunner._looks_like_datetime_level(level0)
-        level1_is_dt = BacktestRunner._looks_like_datetime_level(level1)
+        ratio0, parsed0 = BacktestRunner._datetime_parse_ratio(level0)
+        ratio1, parsed1 = BacktestRunner._datetime_parse_ratio(level1)
 
-        if names == ["instrument", "datetime"] or (not level0_is_dt and level1_is_dt):
-            index = index.swaplevel()
-            level0 = index.get_level_values(0)
-            level1 = index.get_level_values(1)
-            level0_is_dt = BacktestRunner._looks_like_datetime_level(level0)
+        if names == ["instrument", "datetime"]:
+            dt_level = level1
+            inst_level = level0
+            parsed_dt = parsed1
+        elif names == ["datetime", "instrument"]:
+            dt_level = level0
+            inst_level = level1
+            parsed_dt = parsed0
+        elif ratio1 > ratio0:
+            dt_level = level1
+            inst_level = level0
+            parsed_dt = parsed1
+        else:
+            dt_level = level0
+            inst_level = level1
+            parsed_dt = parsed0
 
-        if not level0_is_dt:
+        best_ratio = max(ratio0, ratio1)
+        if best_ratio < 0.8:
             raise ValueError(
                 f"Failed to identify datetime level in MultiIndex names={names}, "
                 f"sample_level0={list(pd.Index(level0).dropna().unique()[:3])}, "
                 f"sample_level1={list(pd.Index(level1).dropna().unique()[:3])}"
             )
 
-        if not pd.api.types.is_datetime64_any_dtype(level0):
-            level0 = pd.to_datetime(level0)
+        if parsed_dt is None or not pd.api.types.is_datetime64_any_dtype(dt_level):
+            dt_level = pd.to_datetime(dt_level, errors="coerce")
+        else:
+            dt_level = parsed_dt
 
         normalized_index = pd.MultiIndex.from_arrays(
-            [level0, level1],
+            [dt_level, inst_level],
             names=["datetime", "instrument"],
         )
 
