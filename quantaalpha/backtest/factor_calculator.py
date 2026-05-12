@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
 
+from quantaalpha.utils.qlib_data import DEFAULT_QLIB_MARKET, resolve_qlib_provider_uri, resolve_qlib_region
+
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
@@ -363,13 +365,11 @@ class QlibDataProvider:
             return
             
         import qlib
-        from qlib.config import REG_CN, REG_US
         
-        provider_uri = self.data_config.get('provider_uri', '~/.qlib/qlib_data/cn_data')
-        region_str = self.data_config.get('region', 'cn')
-        region = REG_US if region_str == 'us' else REG_CN
+        provider_uri = resolve_qlib_provider_uri(self.data_config.get('provider_uri'))
+        region_str = resolve_qlib_region(self.data_config.get('region'))
         
-        qlib.init(provider_uri=provider_uri, region=region)
+        qlib.init(provider_uri=provider_uri, region=region_str)
         self._initialized = True
         logger.info(f"Qlib initialized: {provider_uri} (region={region_str})")
         
@@ -384,7 +384,7 @@ class QlibDataProvider:
         
         start_time = start_time or self.data_config.get('start_time', '2016-01-01')
         end_time = end_time or self.data_config.get('end_time', '2025-12-31')
-        instruments = instruments or self.data_config.get('market', 'csi300')
+        instruments = instruments or self.data_config.get('market', DEFAULT_QLIB_MARKET)
         
         stock_list = D.instruments(instruments)
         

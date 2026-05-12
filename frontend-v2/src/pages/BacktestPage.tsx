@@ -289,8 +289,8 @@ export const BacktestPage: React.FC = () => {
             <Info className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
             <div className="text-sm space-y-1">
               <p className="text-muted-foreground">
-                独立回测在<strong className="text-foreground">测试集（2022-01-01 ~ 2025-12-26）</strong>上评估因子的样本外表现。
-                使用 CSI300 市场股票池，TopK Dropout 策略，LightGBM 模型。
+                独立回测在<strong className="text-foreground">测试集（2019-01-01 ~ 2020-11-10）</strong>上评估因子的样本外表现。
+                使用 S&amp;P 500 市场股票池，TopK Dropout 策略，LightGBM 模型。
               </p>
               <p className="text-muted-foreground">
                 <strong className="text-foreground">custom</strong> 模式仅使用因子库中的自定义因子；
@@ -481,15 +481,15 @@ export const BacktestPage: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-border/50">
             <div className="text-sm">
               <span className="text-muted-foreground">市场：</span>
-              <span className="font-medium ml-1">CSI 300（沪深300）</span>
+              <span className="font-medium ml-1">S&amp;P 500（美股）</span>
             </div>
             <div className="text-sm">
               <span className="text-muted-foreground">回测区间：</span>
-              <span className="font-medium ml-1">2022-01-01 ~ 2025-12-26</span>
+              <span className="font-medium ml-1">2019-01-01 ~ 2020-11-10</span>
             </div>
             <div className="text-sm">
               <span className="text-muted-foreground">基准：</span>
-              <span className="font-medium ml-1">SH000300（沪深300指数）</span>
+              <span className="font-medium ml-1">^GSPC（S&amp;P 500 指数）</span>
             </div>
           </div>
 

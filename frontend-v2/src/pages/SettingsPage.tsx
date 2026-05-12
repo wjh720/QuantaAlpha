@@ -36,7 +36,7 @@ const DEFAULT_CONFIG: SystemConfig = {
   resultsDir: '',
   defaultNumDirections: 2,
   defaultMaxRounds: 3,
-  defaultMarket: 'csi300',
+  defaultMarket: 'sp500',
   parallelExecution: true,
   qualityGateEnabled: true,
   backtestTimeout: 600,
@@ -99,7 +99,7 @@ export const SettingsPage: React.FC = () => {
           resultsDir: env.DATA_RESULTS_DIR || '',
           defaultNumDirections: 2,
           defaultMaxRounds: 3,
-          defaultMarket: 'csi300',
+          defaultMarket: 'sp500',
           parallelExecution: true,
           qualityGateEnabled: true,
           backtestTimeout: 600,
@@ -371,7 +371,7 @@ export const SettingsPage: React.FC = () => {
                     type="text"
                     value={config.qlibDataPath}
                     onChange={(e) => updateConfigField('qlibDataPath', e.target.value)}
-                    placeholder="/path/to/qlib/cn_data"
+                    placeholder="/path/to/qlib/us_data"
                     className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm font-mono focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary transition-all"
                   />
                 </div>
@@ -467,7 +467,7 @@ export const SettingsPage: React.FC = () => {
                   >
                     <option value="csi300">CSI 300 (沪深300)</option>
                     <option value="csi500">CSI 500 (中证500)</option>
-                    <option value="sp500">S&P 500</option>
+                    <option value="sp500">S&P 500 (美股)</option>
                   </select>
                 </div>
 

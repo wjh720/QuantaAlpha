@@ -81,15 +81,15 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
 
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>
-                <span><strong className="text-foreground">默认市场：</strong>CSI 300（沪深300）市场股票数据</span>
+                <span><strong className="text-foreground">默认市场：</strong>S&amp;P 500（美股）市场股票数据</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>
-                <span><strong className="text-foreground">挖掘时间段：</strong>训练集 2016-2020，验证集 2021（初步回测在验证集上进行）</span>
+                <span><strong className="text-foreground">挖掘时间段：</strong>训练集 2008-2016，验证集 2017-2018（初步回测在验证集上进行）</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>
-                <span><strong className="text-foreground">独立回测：</strong>测试集 2022-01-01 ~ 2025-12-26（评估样本外表现）</span>
+                <span><strong className="text-foreground">独立回测：</strong>测试集 2019-01-01 ~ 2020-11-10（评估样本外表现）</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>

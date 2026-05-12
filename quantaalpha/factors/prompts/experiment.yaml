@@ -145,7 +145,7 @@ qlib_factor_from_report_rich_style_description : |-
 qlib_factor_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | LGBModel | Alpha158 Plus | Train: 2012-01-01 to 2018-12-31 <br> Valid: 2019-01-01 to 2020-12-31 <br> Test &nbsp;: 2021-01-01 to 2024-12-01 |
+  | S&P 500 | LGBModel | Alpha158 Plus | Train: 2008-01-01 to 2016-12-31 <br> Valid: 2017-01-01 to 2018-12-31 <br> Test &nbsp;: 2019-01-01 to 2020-11-10 |
 
 
 qlib_model_background: |-
@@ -236,4 +236,4 @@ qlib_model_rich_style_description: |-
 qlib_model_experiment_setting: |-
   | Dataset 📊 | Model 🤖    | Factors 🌟       | Data Split  🧮                                   |
   |---------|----------|---------------|-------------------------------------------------|
-  | CSI300  | QuantaAlpha-dev | 20 factors (Alpha158)  | Train: 2008-01-01 to 2014-12-31 <br> Valid: 2015-01-01 to 2016-12-31 <br> Test &nbsp;: 2017-01-01 to 2020-08-01 |
+  | S&P 500 | QuantaAlpha-dev | 20 factors (Alpha158)  | Train: 2008-01-01 to 2016-12-31 <br> Valid: 2017-01-01 to 2018-12-31 <br> Test &nbsp;: 2019-01-01 to 2020-11-10 |

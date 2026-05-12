@@ -5,11 +5,14 @@ Overrides rdagent QlibFBWorkspace: project-level factor_template overrides defau
 base files (read_exp_res.py, etc.) still from rdagent; init empty git repo in workspace to suppress qlib recorder git output.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace as _RdagentQlibFBWorkspace
 from rdagent.log import rdagent_logger as logger
+
+from quantaalpha.utils.qlib_data import resolve_qlib_provider_uri, resolve_qlib_region
 
 _CUSTOM_TEMPLATE_DIR = Path(__file__).resolve().parent / "factor_template"
 
@@ -29,6 +32,7 @@ class QlibFBWorkspace(_RdagentQlibFBWorkspace):
     def before_execute(self) -> None:
         """Init empty git repo in workspace to suppress qlib recorder git warnings."""
         super().before_execute()
+        self._rewrite_qlib_config_provider()
         git_dir = self.workspace_path / ".git"
         if not git_dir.exists():
             try:
@@ -40,3 +44,21 @@ class QlibFBWorkspace(_RdagentQlibFBWorkspace):
                 )
             except Exception:
                 pass
+
+    def _rewrite_qlib_config_provider(self) -> None:
+        provider_uri = resolve_qlib_provider_uri()
+        region = resolve_qlib_region()
+        for config_name in ("conf_baseline.yaml", "conf_combined_factors.yaml", "conf.yaml"):
+            config_path = self.workspace_path / config_name
+            if not config_path.exists():
+                continue
+
+            text = config_path.read_text(encoding="utf-8")
+            text = re.sub(
+                r'provider_uri:\s*(".*?"|\S+)',
+                f'provider_uri: "{provider_uri}"',
+                text,
+                count=1,
+            )
+            text = re.sub(r"region:\s*\S+", f"region: {region}", text, count=1)
+            config_path.write_text(text, encoding="utf-8")

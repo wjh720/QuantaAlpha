@@ -41,11 +41,11 @@ factor_source:
 ######################################################################
 
 data:
-  provider_uri: "~/.qlib/qlib_data/cn_data"
-  region: "cn"
-  market: "csi300"
-  start_time: "2016-01-01"
-  end_time: "2025-12-26"
+  provider_uri: "data/us_data"
+  region: "us"
+  market: "sp500"
+  start_time: "2008-01-01"
+  end_time: "2020-11-10"
 
 ######################################################################
 # 3. Dataset and preprocessing (dataset)
@@ -80,9 +80,9 @@ dataset:
         fields_group: "label"
 
   segments:
-    train: ["2016-01-01", "2020-12-31"]
-    valid: ["2021-01-01", "2021-12-31"]
-    test:  ["2022-01-01", "2025-12-26"]
+    train: ["2008-01-01", "2016-12-31"]
+    valid: ["2017-01-01", "2018-12-31"]
+    test:  ["2019-01-01", "2020-11-10"]
 
 ######################################################################
 # 4. Model (model)
@@ -121,12 +121,12 @@ backtest:
       n_drop: 5
 
   backtest:
-    start_time: "2022-01-01"
-    end_time: "2025-12-26"
+    start_time: "2019-01-01"
+    end_time: "2020-11-10"
     account: 100000000
-    benchmark: "SH000300"
+    benchmark: "^GSPC"
     exchange_kwargs:
-      limit_threshold: 0.095
+      limit_threshold: null
       deal_price: "open"
       open_cost: 0.0005
       close_cost: 0.0015

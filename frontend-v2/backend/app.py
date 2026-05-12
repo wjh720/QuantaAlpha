@@ -218,11 +218,13 @@ async def _run_mining(task_id: str, req: MiningStartRequest):
         if qlib_data:
             qlib_symlink_dir = Path.home() / ".qlib" / "qlib_data"
             qlib_symlink_dir.mkdir(parents=True, exist_ok=True)
-            cn_data_link = qlib_symlink_dir / "cn_data"
-            if not cn_data_link.exists() or os.readlink(str(cn_data_link)) != qlib_data:
-                if cn_data_link.is_symlink():
-                    cn_data_link.unlink()
-                cn_data_link.symlink_to(qlib_data)
+            for link_name in ("us_data", "cn_data"):
+                data_link = qlib_symlink_dir / link_name
+                current_target = os.readlink(str(data_link)) if data_link.is_symlink() else None
+                if current_target != qlib_data:
+                    if data_link.exists() or data_link.is_symlink():
+                        data_link.unlink()
+                    data_link.symlink_to(qlib_data)
 
         # Build a temporary config with frontend parameter overrides
         base_config_path = PROJECT_ROOT / "configs" / "experiment.yaml"

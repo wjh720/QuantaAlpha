@@ -15,6 +15,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from quantaalpha.utils.qlib_data import resolve_qlib_provider_uri, resolve_qlib_region, sanitize_exchange_kwargs
+
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 
@@ -38,15 +40,9 @@ class BacktestRunner:
     def _init_qlib(self):
         if self._qlib_initialized:
             return
-        import os
         import qlib
-        provider_uri = (
-            os.environ.get('QLIB_DATA_DIR')
-            or os.environ.get('QLIB_PROVIDER_URI')
-            or self.config['data']['provider_uri']
-        )
-        provider_uri = os.path.expanduser(provider_uri)
-        region = self.config['data'].get('region', 'cn')
+        provider_uri = resolve_qlib_provider_uri(self.config['data'].get('provider_uri'))
+        region = resolve_qlib_region(self.config['data'].get('region'))
         qlib.init(provider_uri=provider_uri, region=region)
         self._qlib_initialized = True
         logger.info(f"Qlib initialized: {provider_uri} (region={region})")
@@ -676,7 +672,7 @@ class BacktestRunner:
                     benchmark=backtest_config['benchmark'],
                     exchange_kwargs={
                         "codes": stock_list,
-                        **backtest_config['exchange_kwargs']
+                        **sanitize_exchange_kwargs(backtest_config.get('exchange_kwargs'))
                     }
                 )
                 

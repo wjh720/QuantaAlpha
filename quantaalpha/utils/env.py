@@ -28,6 +28,7 @@ from rich.table import Table
 
 from quantaalpha.core.conf import ExtendedBaseSettings, ExtendedSettingsConfigDict
 from quantaalpha.log import logger
+from quantaalpha.utils.qlib_data import resolve_qlib_provider_uri, resolve_qlib_region
 
 ASpecificBaseModel = TypeVar("ASpecificBaseModel", bound=BaseModel)
 
@@ -88,12 +89,10 @@ class LocalEnv(Env[LocalConf]):
     """
 
     def prepare(self):
-        qlib_data_dir = os.environ.get("QLIB_DATA_DIR", 
-                         os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data"))
-        qlib_data_path = Path(qlib_data_dir).expanduser().resolve()
+        qlib_data_path = Path(resolve_qlib_provider_uri()).resolve()
         if not qlib_data_path.exists():
             self.run(
-                entry=f"python -m qlib.run.get_data qlib_data --target_dir {qlib_data_path} --region cn",
+                entry=f"python -m qlib.run.get_data qlib_data --target_dir {qlib_data_path} --region {resolve_qlib_region()}",
             )
         else:
             print(f"Data already exists at {qlib_data_path}. Download skipped.")
@@ -138,10 +137,7 @@ class QlibLocalEnv(LocalEnv):
     def prepare(self):
         """Ensure local environment is ready."""
         logger.info("Use local environment to run Qlib backtest")
-        # Read Qlib data path from env
-        qlib_data_dir = os.environ.get("QLIB_DATA_DIR",
-                         os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data"))
-        qlib_data_path = Path(qlib_data_dir).expanduser()
+        qlib_data_path = Path(resolve_qlib_provider_uri())
         if not qlib_data_path.exists():
             logger.warning(f"Qlib data directory does not exist: {qlib_data_path}; please ensure data is downloaded")
         
