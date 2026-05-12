@@ -85,7 +85,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onNavigate }) => {
               </div>
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>
-                <span><strong className="text-foreground">挖掘时间段：</strong>训练集 2008-2016，验证集 2017-2018（初步回测在验证集上进行）</span>
+                <span><strong className="text-foreground">挖掘时间段：</strong>训练集 2008-2014，验证集 2015-2016，挖掘反馈集 2017-2018</span>
               </div>
               <div className="flex items-start gap-2">
                 <span className="text-primary mt-0.5">&#9679;</span>

@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
 
-from quantaalpha.utils.qlib_data import DEFAULT_QLIB_MARKET, resolve_qlib_provider_uri, resolve_qlib_region
+from quantaalpha.utils.qlib_data import resolve_qlib_market, resolve_qlib_provider_uri, resolve_qlib_region
 
 # Add project root (from quantaalpha/backtest/ up two levels)
 project_root = Path(__file__).resolve().parents[2]
@@ -638,7 +638,11 @@ def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
     
     start_time = data_config.get('start_time', '2016-01-01')
     end_time = data_config.get('end_time', '2025-12-31')
-    market = data_config.get('market', DEFAULT_QLIB_MARKET)
+    market = resolve_qlib_market(
+        data_config.get('market'),
+        region=region,
+        provider_uri=provider_uri,
+    )
 
     print(
         f"  Loading Qlib stock data: market={market}, range={start_time}~{end_time}, region={region}"

@@ -1,12 +1,13 @@
 import qlib
 
-from quantaalpha.utils.qlib_data import DEFAULT_QLIB_MARKET, resolve_qlib_provider_uri, resolve_qlib_region
+from quantaalpha.utils.qlib_data import resolve_qlib_market, resolve_qlib_provider_uri, resolve_qlib_region
 
 _provider = resolve_qlib_provider_uri()
-qlib.init(provider_uri=_provider, region=resolve_qlib_region())
+_region = resolve_qlib_region(provider_uri=_provider)
+qlib.init(provider_uri=_provider, region=_region)
 from qlib.data import D
 
-instruments = D.instruments(DEFAULT_QLIB_MARKET)
+instruments = D.instruments(resolve_qlib_market(region=_region, provider_uri=_provider))
 fields = ["$open", "$close", "$high", "$low", "$volume"]  # , "$amount", "$turn", "$pettm", "$pbmrq"
 data = D.features(instruments, fields, freq="day").swaplevel().sort_index().loc["2015-01-01":].sort_index()
 

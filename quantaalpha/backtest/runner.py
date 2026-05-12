@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from quantaalpha.utils.qlib_data import resolve_qlib_provider_uri, resolve_qlib_region, sanitize_exchange_kwargs
+from quantaalpha.utils.qlib_data import apply_qlib_data_env, resolve_qlib_provider_uri, resolve_qlib_region, sanitize_exchange_kwargs
 
 project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
@@ -34,6 +34,7 @@ class BacktestRunner:
     def _load_config(self) -> Dict:
         with open(self.config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
+        config = apply_qlib_data_env(config)
         logger.info(f"Loaded config: {self.config_path}")
         return config
 

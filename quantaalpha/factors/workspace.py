@@ -12,7 +12,7 @@ from pathlib import Path
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace as _RdagentQlibFBWorkspace
 from rdagent.log import rdagent_logger as logger
 
-from quantaalpha.utils.qlib_data import resolve_qlib_provider_uri, resolve_qlib_region
+from quantaalpha.utils.qlib_data import resolve_qlib_benchmark, resolve_qlib_market, resolve_qlib_provider_uri, resolve_qlib_region
 
 _CUSTOM_TEMPLATE_DIR = Path(__file__).resolve().parent / "factor_template"
 
@@ -47,7 +47,9 @@ class QlibFBWorkspace(_RdagentQlibFBWorkspace):
 
     def _rewrite_qlib_config_provider(self) -> None:
         provider_uri = resolve_qlib_provider_uri()
-        region = resolve_qlib_region()
+        region = resolve_qlib_region(provider_uri=provider_uri)
+        market = resolve_qlib_market(region=region, provider_uri=provider_uri)
+        benchmark = resolve_qlib_benchmark(region=region, provider_uri=provider_uri)
         for config_name in ("conf_baseline.yaml", "conf_combined_factors.yaml", "conf.yaml"):
             config_path = self.workspace_path / config_name
             if not config_path.exists():
@@ -61,4 +63,6 @@ class QlibFBWorkspace(_RdagentQlibFBWorkspace):
                 count=1,
             )
             text = re.sub(r"region:\s*\S+", f"region: {region}", text, count=1)
+            text = re.sub(r"market:\s*&market\s+\S+", f"market: &market {market}", text, count=1)
+            text = re.sub(r"benchmark:\s*&benchmark\s+\S+", f"benchmark: &benchmark {benchmark}", text, count=1)
             config_path.write_text(text, encoding="utf-8")
