@@ -348,6 +348,11 @@ class CustomFactorCalculator:
         failed_names = []
         total = len(factors)
         need_compute_factors = []
+        factor_info_by_name = {
+            factor_info.get('factor_name', 'unknown'): factor_info
+            for factor_info in factors
+            if factor_info.get('factor_expression', '')
+        }
         
         # Pass 1: load from cache
         for i, factor_info in enumerate(factors):
@@ -411,25 +416,76 @@ class CustomFactorCalculator:
                     f"failed {len(computed_failed_names)} ({elapsed:.1f}s)"
                 )
         
-        print(f"Factor load done: success {success_count}, failed {fail_count} | "
-              f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
-        if failed_names:
-            print(f"  Failed: {', '.join(failed_names)}")
-        
         if not results:
+            print(f"Factor load done: success {success_count}, failed {fail_count} | "
+                  f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
+            if failed_names:
+                print(f"  Failed: {', '.join(failed_names)}")
             return pd.DataFrame()
         
         # Align results to common index
         aligned_results = {}
-        reference_index = None
+        invalid_cache_names = []
+        reference_index = self.data_df.index
         
         for name, series in results.items():
-            if reference_index is None:
-                reference_index = series.index
             validated = self._validate_and_align_result(series, name, reference_index)
             if validated is not None:
                 aligned_results[name] = validated
+            else:
+                invalid_cache_names.append(name)
+
+        if invalid_cache_names:
+            success_count -= len(invalid_cache_names)
+            if skip_compute:
+                print(
+                    f"  Skipping {len(invalid_cache_names)} cache-mismatch factors "
+                    f"(skip_compute=True): {', '.join(invalid_cache_names)}"
+                )
+                fail_count += len(invalid_cache_names)
+                failed_names.extend(invalid_cache_names)
+            else:
+                invalid_factor_infos = [
+                    (idx, factor_info_by_name[name])
+                    for idx, name in enumerate(invalid_cache_names)
+                    if name in factor_info_by_name
+                ]
+                if invalid_factor_infos:
+                    print(
+                        f"  Recomputing {len(invalid_factor_infos)} cache-mismatch factors in parallel..."
+                    )
+                    t0 = _time.time()
+                    recomputed_results, recomputed_failed_names, new_compute_count = self._calculate_factors_parallel(
+                        need_compute_factors=invalid_factor_infos,
+                        use_cache=use_cache,
+                    )
+                    elapsed = _time.time() - t0
+                    compute_count += new_compute_count
+                    revalidated_success_count = 0
+                    revalidated_failed_names = list(recomputed_failed_names)
+
+                    for name, series in recomputed_results.items():
+                        validated = self._validate_and_align_result(series, name, reference_index)
+                        if validated is not None:
+                            aligned_results[name] = validated
+                            revalidated_success_count += 1
+                        else:
+                            revalidated_failed_names.append(name)
+
+                    success_count += revalidated_success_count
+                    fail_count += len(revalidated_failed_names)
+                    failed_names.extend(revalidated_failed_names)
+
+                    print(
+                        f"  Cache-mismatch recompute done: success {revalidated_success_count}, "
+                        f"failed {len(revalidated_failed_names)} ({elapsed:.1f}s)"
+                    )
         
+        print(f"Factor load done: success {success_count}, failed {fail_count} | "
+              f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
+        if failed_names:
+            print(f"  Failed: {', '.join(failed_names)}")
+
         if aligned_results:
             result_df = pd.DataFrame(aligned_results)
             logger.debug(f"  Result DataFrame: {result_df.shape}")

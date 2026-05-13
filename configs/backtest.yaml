@@ -154,6 +154,6 @@ factor_calculation:
   output_dir: "data/results/computed_factors"
   save_intermediate: true
   n_jobs: 4
-  recompute_backend: "thread"
-  recompute_n_jobs: 16
+  recompute_backend: "process"
+  recompute_n_jobs: 100
   data_file: null  # When null, data is fetched from qlib
