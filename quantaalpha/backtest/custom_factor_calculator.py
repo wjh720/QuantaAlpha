@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -245,7 +246,53 @@ class CustomFactorCalculator:
             logger.debug("Cache extractor not available, skip auto-extract")
         except Exception as e:
             logger.warning(f"Auto-extract cache failed: {e}")
-        
+
+    def _load_single_factor_cache_task(self, task: Tuple[int, Dict, bool]) -> Tuple[int, str, str, Optional[pd.Series]]:
+        """Load one factor from H5 cache or MD5 cache."""
+        i, factor_info, use_cache = task
+        factor_name = factor_info.get('factor_name', 'unknown')
+        factor_expr = factor_info.get('factor_expression', '')
+        cache_location = factor_info.get('cache_location')
+
+        if not factor_expr:
+            return i, factor_name, 'invalid', None
+
+        if use_cache and cache_location:
+            h5_path = cache_location.get('result_h5_path', '')
+            if h5_path:
+                result = self._load_from_cache_location(cache_location)
+                if result is not None:
+                    return i, factor_name, 'h5', result
+
+        if use_cache:
+            result = self._load_from_cache(factor_expr)
+            if result is not None:
+                return i, factor_name, 'md5', result
+
+        return i, factor_name, 'miss', None
+
+    def _load_factor_caches_parallel(self, factors: List[Dict], use_cache: bool) -> List[Tuple[int, str, str, Optional[pd.Series]]]:
+        """Load factor caches in parallel. Threading is preferable for disk IO."""
+        tasks = [(i, factor_info, use_cache) for i, factor_info in enumerate(factors)]
+        if not tasks:
+            return []
+
+        max_workers = min(32, max(1, len(tasks), os.cpu_count() or 1))
+        if len(tasks) == 1 or max_workers == 1:
+            return [self._load_single_factor_cache_task(task) for task in tasks]
+
+        results = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(self._load_single_factor_cache_task, task): task
+                for task in tasks
+            }
+            for future in as_completed(future_to_task):
+                results.append(future.result())
+
+        results.sort(key=lambda x: x[0])
+        return results
+    
     def calculate_factor(self, factor_name: str, factor_expression: str) -> Optional[pd.Series]:
         """
         Compute a single factor.
@@ -382,40 +429,34 @@ class CustomFactorCalculator:
         need_compute_factors = []
         
         # Pass 1: load from cache
+        cache_results = self._load_factor_caches_parallel(factors, use_cache=use_cache)
         for i, factor_info in enumerate(factors):
             factor_name = factor_info.get('factor_name', 'unknown')
             factor_expr = factor_info.get('factor_expression', '')
-            cache_location = factor_info.get('cache_location')
-            
             if not factor_expr:
                 fail_count += 1
                 failed_names.append(factor_name)
                 continue
-            
-            result = None
-            
-            if use_cache and cache_location:
-                h5_path = cache_location.get('result_h5_path', '')
-                if h5_path:
-                    result = self._load_from_cache_location(cache_location)
-                    if result is not None:
-                        cache_location_hit_count += 1
-                        results[factor_name] = result
-                        success_count += 1
-                        print(f"  [{i+1}/{total}] ✓ H5 cache: {factor_name}")
-                        continue
-            
-            if use_cache:
-                result = self._load_from_cache(factor_expr)
-                if result is not None:
-                    cache_hit_count += 1
-                    results[factor_name] = result
-                    success_count += 1
-                    print(f"  [{i+1}/{total}] ✓ MD5 cache: {factor_name}")
-                    continue
-            
-            need_compute_factors.append((i, factor_info))
-            print(f"  [{i+1}/{total}] ⏳ Pending: {factor_name}")
+
+        for i, factor_name, cache_type, result in cache_results:
+            factor_info = factors[i]
+            factor_expr = factor_info.get('factor_expression', '')
+            if not factor_expr:
+                continue
+
+            if cache_type == 'h5' and result is not None:
+                cache_location_hit_count += 1
+                results[factor_name] = result
+                success_count += 1
+                print(f"  [{i+1}/{total}] ✓ H5 cache: {factor_name}")
+            elif cache_type == 'md5' and result is not None:
+                cache_hit_count += 1
+                results[factor_name] = result
+                success_count += 1
+                print(f"  [{i+1}/{total}] ✓ MD5 cache: {factor_name}")
+            elif cache_type == 'miss':
+                need_compute_factors.append((i, factor_info))
+                print(f"  [{i+1}/{total}] ⏳ Pending: {factor_name}")
         
         # Pass 2: compute uncached factors
         if need_compute_factors:
