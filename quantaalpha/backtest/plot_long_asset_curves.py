@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import argparse
+import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -26,6 +27,66 @@ logger = logging.getLogger(__name__)
 
 def _cumsum_return(series: pd.Series) -> pd.Series:
     return series.fillna(0).cumsum()
+
+
+def _ensure_qlib_initialized() -> None:
+    import qlib
+
+    provider_uri = os.environ.get("QLIB_DATA_DIR") or os.environ.get("QLIB_PROVIDER_URI") or "~/.qlib/qlib_data/cn_data"
+    provider_uri = os.path.expanduser(provider_uri)
+    if not getattr(qlib, "C", None).initialized:
+        qlib.init(provider_uri=provider_uri, region="cn")
+
+
+def _get_market_assets(market: str, start_date, end_date) -> set[str]:
+    from qlib.data import D
+
+    _ensure_qlib_initialized()
+
+    instruments = D.instruments(market)
+    return set(
+        D.list_instruments(
+            instruments,
+            start_time=start_date,
+            end_time=end_date,
+            as_list=True,
+        )
+    )
+
+
+def _get_market_membership_df(market: str, start_date, end_date) -> pd.DataFrame:
+    from qlib.data import D
+
+    _ensure_qlib_initialized()
+
+    market_weight = D.features(
+        D.instruments("all"),
+        [f"${market}_weight"],
+        start_time=start_date,
+        end_time=end_date,
+        freq="day",
+    )
+    market_weight.columns = ["market_weight"]
+    membership_df = market_weight.reset_index()
+    membership_df["in_market"] = membership_df["market_weight"].fillna(0) > 0
+    return membership_df[["datetime", "instrument", "in_market"]]
+
+
+def _zero_returns_outside_market(detail_df: pd.DataFrame, market: str) -> pd.DataFrame:
+    if detail_df.empty:
+        return detail_df
+
+    membership_df = _get_market_membership_df(
+        market=market,
+        start_date=detail_df["datetime"].min(),
+        end_date=detail_df["datetime"].max(),
+    )
+    adjusted_df = detail_df.merge(membership_df, on=["datetime", "instrument"], how="left")
+    adjusted_df["in_market"] = adjusted_df["in_market"].fillna(False)
+    outside_mask = ~adjusted_df["in_market"]
+    adjusted_df.loc[outside_mask, "asset_ret"] = 0
+    adjusted_df.loc[outside_mask, "model_trade_ret"] = 0
+    return adjusted_df.drop(columns=["in_market"])
 
 
 def _sanitize_filename(name: str) -> str:
@@ -204,13 +265,22 @@ def _plot_single_asset(args: tuple[str, pd.DataFrame, str]) -> str:
     return str(output_path)
 
 
-def plot_asset_curves_parallel(detail_df: pd.DataFrame, output_dir: Path, n_jobs: int = 100) -> list[Path]:
+def plot_asset_curves_parallel(
+    detail_df: pd.DataFrame,
+    output_dir: Path,
+    n_jobs: int = 100,
+    allowed_assets: set[str] | None = None,
+) -> list[Path]:
     """Plot per-asset curves in parallel."""
     if detail_df.empty:
         return []
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    grouped_frames = [(asset, asset_df.copy(), str(output_dir)) for asset, asset_df in detail_df.groupby("instrument", sort=True)]
+    grouped_frames = []
+    for asset, asset_df in detail_df.groupby("instrument", sort=True):
+        if allowed_assets is not None and asset not in allowed_assets:
+            continue
+        grouped_frames.append((asset, asset_df.copy(), str(output_dir)))
     if not grouped_frames:
         return []
 
@@ -288,14 +358,34 @@ def save_asset_trade_data(
     }
 
 
-def plot_saved_asset_trade_outputs(output_dir: Path, file_prefix: str, n_jobs: int = 100) -> dict[str, Path]:
+def plot_saved_asset_trade_outputs(
+    output_dir: Path,
+    file_prefix: str,
+    n_jobs: int = 100,
+    market: str = "csi300",
+) -> dict[str, Path]:
     """Step 2: load saved data and generate plots."""
     paths = _asset_trade_paths(output_dir, file_prefix)
     daily_df = pd.read_parquet(paths["daily_parquet"])
     detail_df = pd.read_parquet(paths["detail_parquet"])
+    detail_df = _zero_returns_outside_market(detail_df, market=market)
+    daily_df = build_daily_summary(detail_df)
+    allowed_assets = _get_market_assets(
+        market=market,
+        start_date=detail_df["datetime"].min(),
+        end_date=detail_df["datetime"].max(),
+    )
+    skipped_assets = sorted(set(detail_df["instrument"].unique()) - allowed_assets)
+    if skipped_assets:
+        logger.info("Skip %d assets outside %s", len(skipped_assets), market)
 
     plot_overall_curves(daily_df, paths["overall_plot"])
-    plot_asset_curves_parallel(detail_df, paths["asset_plot_dir"], n_jobs=n_jobs)
+    plot_asset_curves_parallel(
+        detail_df,
+        paths["asset_plot_dir"],
+        n_jobs=n_jobs,
+        allowed_assets=allowed_assets,
+    )
 
     return {
         "overall_plot": paths["overall_plot"],
@@ -315,6 +405,7 @@ def main():
         default="all_factors_library",
         help="File prefix used by backtest output",
     )
+    parser.add_argument("--market", default="csi300", help="Only plot asset-level curves for assets in this market")
     parser.add_argument("--n-jobs", type=int, default=100, help="Parallel asset plotting workers")
     args = parser.parse_args()
 
@@ -322,6 +413,7 @@ def main():
         output_dir=Path(args.output_dir),
         file_prefix=args.prefix,
         n_jobs=args.n_jobs,
+        market=args.market,
     )
     print({key: str(value) for key, value in outputs.items()})
 
