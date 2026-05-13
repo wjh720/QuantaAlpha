@@ -339,10 +339,14 @@ class BacktestRunner:
             
             try:
                 if not pd.api.types.is_datetime64_any_dtype(feat_dt):
-                    features_df = self._normalize_datetime_instrument_index(features_df)
+                    features_df.index = features_df.index.set_levels(
+                        pd.to_datetime(feat_dt.unique()), level='datetime'
+                    )
                     logger.debug("  features datetime converted to Timestamp")
                 if not pd.api.types.is_datetime64_any_dtype(label_dt):
-                    label_df = self._normalize_datetime_instrument_index(label_df)
+                    label_df.index = label_df.index.set_levels(
+                        pd.to_datetime(label_dt.unique()), level='datetime'
+                    )
                     logger.debug("  label datetime converted to Timestamp")
             except Exception as e:
                 logger.warning(f"  datetime type conversion failed: {e}")
