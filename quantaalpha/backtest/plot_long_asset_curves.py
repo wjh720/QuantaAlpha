@@ -34,8 +34,11 @@ def _ensure_qlib_initialized() -> None:
 
     provider_uri = os.environ.get("QLIB_DATA_DIR") or os.environ.get("QLIB_PROVIDER_URI") or "~/.qlib/qlib_data/cn_data"
     provider_uri = os.path.expanduser(provider_uri)
-    if not getattr(qlib, "C", None).initialized:
-        qlib.init(provider_uri=provider_uri, region="cn")
+    qlib.init(
+        provider_uri=provider_uri,
+        region="cn",
+        clear_mem_cache=False,
+    )
 
 
 def _get_market_assets(market: str, start_date, end_date) -> set[str]:
