@@ -514,25 +514,30 @@ class BacktestRunner:
             # Compute IC metrics
             try:
                 sar = SigAnaRecord(recorder=R.get_recorder(), ana_long_short=False, ann_scaler=252)
-                sar.generate()
-                
-                recorder = R.get_recorder()
-                try:
-                    ic_series = recorder.load_object("sig_analysis/ic.pkl")
-                    ric_series = recorder.load_object("sig_analysis/ric.pkl")
-                    
-                    if isinstance(ic_series, pd.Series) and len(ic_series) > 0:
-                        metrics['IC'] = float(ic_series.mean())
-                        metrics['ICIR'] = float(ic_series.mean() / ic_series.std()) if ic_series.std() > 0 else 0.0
-                    
-                    if isinstance(ric_series, pd.Series) and len(ric_series) > 0:
-                        metrics['Rank IC'] = float(ric_series.mean())
-                        metrics['Rank ICIR'] = float(ric_series.mean() / ric_series.std()) if ric_series.std() > 0 else 0.0
-                    
-                    print(f"  IC={metrics.get('IC', 0):.6f}, ICIR={metrics.get('ICIR', 0):.6f}, "
-                          f"Rank IC={metrics.get('Rank IC', 0):.6f}, Rank ICIR={metrics.get('Rank ICIR', 0):.6f}")
-                except Exception as e:
-                    logger.warning(f"Could not read IC result: {e}")
+                sig_analysis = sar.generate()
+
+                ic_series = sig_analysis.get("ic.pkl") if isinstance(sig_analysis, dict) else None
+                ric_series = sig_analysis.get("ric.pkl") if isinstance(sig_analysis, dict) else None
+
+                if ic_series is None or ric_series is None:
+                    recorder = R.get_recorder()
+                    try:
+                        ic_series = recorder.load_object("sig_analysis/ic.pkl")
+                        ric_series = recorder.load_object("sig_analysis/ric.pkl")
+                    except Exception as e:
+                        logger.warning(f"Could not read IC result artifact: {e}")
+
+                if isinstance(ic_series, pd.Series) and len(ic_series) > 0:
+                    metrics['IC'] = float(ic_series.mean())
+                    metrics['ICIR'] = float(ic_series.mean() / ic_series.std()) if ic_series.std() > 0 else 0.0
+
+                if isinstance(ric_series, pd.Series) and len(ric_series) > 0:
+                    metrics['Rank IC'] = float(ric_series.mean())
+                    metrics['Rank ICIR'] = float(ric_series.mean() / ric_series.std()) if ric_series.std() > 0 else 0.0
+
+                if all(key in metrics for key in ('IC', 'ICIR', 'Rank IC', 'Rank ICIR')):
+                    print(f"  IC={metrics['IC']:.6f}, ICIR={metrics['ICIR']:.6f}, "
+                          f"Rank IC={metrics['Rank IC']:.6f}, Rank ICIR={metrics['Rank ICIR']:.6f}")
             except Exception as e:
                 logger.warning(f"IC analysis failed: {e}")
             # Portfolio backtest
@@ -626,14 +631,12 @@ class BacktestRunner:
                         excess_return_with_cost = excess_return_with_cost.dropna()
                         
                         if len(excess_return_with_cost) > 0:
+                            output_dir = Path(self.config['experiment'].get('output_dir', './backtest_v2_results'))
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                            file_prefix = output_name if output_name else exp_name
                             try:
                                 daily_df = report_df.copy()
                                 daily_df['excess_return'] = excess_return_with_cost
-                                
-                                output_dir = Path(self.config['experiment'].get('output_dir', './backtest_v2_results'))
-                                output_dir.mkdir(parents=True, exist_ok=True)
-                                
-                                file_prefix = output_name if output_name else exp_name
                                 csv_path = output_dir / f"{file_prefix}_cumulative_excess.csv"
                                 save_df = daily_df[['excess_return']].copy()
                                 save_df.columns = ['daily_excess_return']
@@ -644,6 +647,48 @@ class BacktestRunner:
                                 logger.debug(f"  Daily excess return saved: {csv_path}")
                             except Exception as csv_err:
                                 logger.warning(f"Failed to save daily CSV: {csv_err}")
+
+                            try:
+                                from qlib.contrib.report.analysis_position.parse_position import parse_position
+
+                                from .plot_long_asset_curves import save_asset_trade_outputs
+
+                                parsed_position_df = parse_position(positions_df)
+                                traded_assets = sorted(
+                                    parsed_position_df.index.get_level_values('instrument').unique().tolist()
+                                )
+                                if not traded_assets:
+                                    raise ValueError("No traded assets found in position data")
+
+                                label_expr = self.config['dataset']['label']
+                                label_data = D.features(
+                                    traded_assets,
+                                    [label_expr],
+                                    start_time=backtest_config['start_time'],
+                                    end_time=backtest_config['end_time'],
+                                    freq='day'
+                                )
+                                label_data.columns = ['label']
+
+                                n_jobs = self.config.get('plot', {}).get(
+                                    'n_jobs',
+                                    self.config.get('factor_calculation', {}).get('n_jobs', 4)
+                                )
+                                plot_outputs = save_asset_trade_outputs(
+                                    position=positions_df,
+                                    report_df=report_df,
+                                    label_data=label_data,
+                                    output_dir=output_dir,
+                                    file_prefix=file_prefix,
+                                    n_jobs=n_jobs,
+                                )
+                                if plot_outputs:
+                                    logger.debug(
+                                        "  Asset trade outputs saved: %s",
+                                        {k: str(v) for k, v in plot_outputs.items()}
+                                    )
+                            except Exception as plot_err:
+                                logger.warning(f"Failed to save asset trade curves: {plot_err}")
 
                             analysis = risk_analysis(excess_return_with_cost)
                             

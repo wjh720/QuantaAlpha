@@ -15,7 +15,9 @@ import json
 import logging
 import os
 import sys
+import tempfile
 import warnings
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -35,6 +37,27 @@ os.environ.setdefault('JOBLIB_START_METHOD', 'loky')
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = Path(os.environ.get("FACTOR_CACHE_DIR", "data/results/factor_cache"))
+_WORKER_DATA_DF: Optional[pd.DataFrame] = None
+
+
+def _init_factor_compute_worker(data_path: str):
+    global _WORKER_DATA_DF
+    _WORKER_DATA_DF = pd.read_pickle(data_path)
+
+
+def _compute_factor_worker(task: tuple[str, str]) -> tuple[str, str, Optional[pd.Series], Optional[str]]:
+    factor_name, factor_expr = task
+    try:
+        calculator = CustomFactorCalculator(
+            data_df=_WORKER_DATA_DF,
+            cache_dir=DEFAULT_CACHE_DIR,
+            auto_extract_cache=False,
+            config=None,
+        )
+        result = calculator.calculate_factor(factor_name, factor_expr)
+        return factor_name, factor_expr, result, None
+    except Exception as e:
+        return factor_name, factor_expr, None, str(e)
 
 
 class CustomFactorCalculator:
@@ -372,76 +395,21 @@ class CustomFactorCalculator:
                     print(f"  Skipped: {', '.join(skipped_names)}")
             else:
                 print(f"  Computing {len(need_compute_factors)} factors from expressions...")
-                
-                for idx, (orig_i, factor_info) in enumerate(need_compute_factors):
-                    factor_name = factor_info.get('factor_name', 'unknown')
-                    factor_expr = factor_info.get('factor_expression', '')
-                    
-                    print(f"  Compute [{idx+1}/{len(need_compute_factors)}]: {factor_name} ...", end='', flush=True)
-                    t0 = _time.time()
-                    
-                    try:
-                        import signal as _signal
-                        
-                        class _FactorTimeout(Exception):
-                            pass
-                        
-                        def _timeout_handler(signum, frame):
-                            raise _FactorTimeout()
-                        
-                        old_handler = None
-                        try:
-                            old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
-                            _signal.alarm(120)
-                        except (AttributeError, ValueError):
-                            pass
-                        
-                        result = self.calculate_factor(factor_name, factor_expr)
-                        
-                        try:
-                            _signal.alarm(0)
-                            if old_handler is not None:
-                                _signal.signal(_signal.SIGALRM, old_handler)
-                        except (AttributeError, ValueError):
-                            pass
-                        
-                    except _FactorTimeout:
-                        elapsed = _time.time() - t0
-                        print(f" ✗ Timeout ({elapsed:.1f}s)")
-                        fail_count += 1
-                        failed_names.append(f"{factor_name}(timeout)")
-                        try:
-                            _signal.alarm(0)
-                            if old_handler is not None:
-                                _signal.signal(_signal.SIGALRM, old_handler)
-                        except (AttributeError, ValueError):
-                            pass
-                        continue
-                    except Exception as e:
-                        elapsed = _time.time() - t0
-                        print(f" ✗ Error ({elapsed:.1f}s): {str(e)[:80]}")
-                        fail_count += 1
-                        failed_names.append(factor_name)
-                        continue
-                    
-                    elapsed = _time.time() - t0
-                    
-                    if result is not None and len(result) > 0:
-                        if not result.isna().all():
-                            results[factor_name] = result
-                            success_count += 1
-                            compute_count += 1
-                            print(f" ✓ ({elapsed:.1f}s)")
-                            if use_cache:
-                                self._save_to_cache(factor_expr, result)
-                        else:
-                            fail_count += 1
-                            failed_names.append(factor_name)
-                            print(f" ✗ All NaN ({elapsed:.1f}s)")
-                    else:
-                        fail_count += 1
-                        failed_names.append(factor_name)
-                        print(f" ✗ Failed ({elapsed:.1f}s)")
+                t0 = _time.time()
+                computed_results, computed_failed_names, new_compute_count = self._calculate_factors_parallel(
+                    need_compute_factors=need_compute_factors,
+                    use_cache=use_cache,
+                )
+                elapsed = _time.time() - t0
+                results.update(computed_results)
+                success_count += len(computed_results)
+                fail_count += len(computed_failed_names)
+                failed_names.extend(computed_failed_names)
+                compute_count += new_compute_count
+                print(
+                    f"  Parallel recompute done: success {len(computed_results)}, "
+                    f"failed {len(computed_failed_names)} ({elapsed:.1f}s)"
+                )
         
         print(f"Factor load done: success {success_count}, failed {fail_count} | "
               f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
@@ -468,6 +436,144 @@ class CustomFactorCalculator:
             return result_df
         
         return pd.DataFrame()
+
+    def _calculate_factors_parallel(
+        self,
+        need_compute_factors: List[Tuple[int, Dict]],
+        use_cache: bool,
+    ) -> tuple[dict[str, pd.Series], list[str], int]:
+        """Compute uncached factors in parallel."""
+        factor_config = self._config.get('factor_calculation', {}) if self._config else {}
+        backend = str(factor_config.get('recompute_backend', 'thread')).lower()
+        n_jobs = int(factor_config.get('recompute_n_jobs', factor_config.get('n_jobs', 4)))
+
+        tasks: list[tuple[str, str]] = []
+        for _, factor_info in need_compute_factors:
+            factor_name = factor_info.get('factor_name', 'unknown')
+            factor_expr = factor_info.get('factor_expression', '')
+            if factor_expr:
+                tasks.append((factor_name, factor_expr))
+
+        if not tasks:
+            return {}, [], 0
+
+        _ = self.data_df
+        max_workers = max(1, min(n_jobs, len(tasks)))
+        print(f"  Parallel recompute backend={backend}, workers={max_workers}")
+        if backend == 'process' and max_workers > (os.cpu_count() or 1) * 2:
+            logger.warning(
+                "recompute_backend=process with workers=%s may be memory-heavy on large factor data",
+                max_workers,
+            )
+
+        if backend == 'process':
+            return self._calculate_factors_parallel_process(tasks, use_cache, max_workers)
+        return self._calculate_factors_parallel_thread(tasks, use_cache, max_workers)
+
+    def _calculate_factors_parallel_thread(
+        self,
+        tasks: List[tuple[str, str]],
+        use_cache: bool,
+        max_workers: int,
+    ) -> tuple[dict[str, pd.Series], list[str], int]:
+        """Compute factors with threads to avoid duplicating the large source DataFrame."""
+        results: dict[str, pd.Series] = {}
+        failed_names: list[str] = []
+        computed_count = 0
+
+        if max_workers == 1:
+            for factor_name, factor_expr in tasks:
+                result = self.calculate_factor(factor_name, factor_expr)
+                if result is not None and len(result) > 0 and not result.isna().all():
+                    results[factor_name] = result
+                    computed_count += 1
+                    if use_cache:
+                        self._save_to_cache(factor_expr, result)
+                else:
+                    failed_names.append(factor_name)
+            return results, failed_names, computed_count
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_task = {
+                executor.submit(self.calculate_factor, factor_name, factor_expr): (factor_name, factor_expr)
+                for factor_name, factor_expr in tasks
+            }
+            for future in as_completed(future_to_task):
+                factor_name, factor_expr = future_to_task[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    print(f"  ✗ Error: {factor_name}: {str(e)[:80]}")
+                    failed_names.append(factor_name)
+                    continue
+
+                if result is not None and len(result) > 0 and not result.isna().all():
+                    results[factor_name] = result
+                    computed_count += 1
+                    print(f"  ✓ Computed: {factor_name}")
+                    if use_cache:
+                        self._save_to_cache(factor_expr, result)
+                else:
+                    print(f"  ✗ Failed: {factor_name}")
+                    failed_names.append(factor_name)
+
+        return results, failed_names, computed_count
+
+    def _calculate_factors_parallel_process(
+        self,
+        tasks: List[tuple[str, str]],
+        use_cache: bool,
+        max_workers: int,
+    ) -> tuple[dict[str, pd.Series], list[str], int]:
+        """Compute factors with processes."""
+        results: dict[str, pd.Series] = {}
+        failed_names: list[str] = []
+        computed_count = 0
+
+        data_df = self.data_df
+        with tempfile.NamedTemporaryFile(prefix='qa_factor_data_', suffix='.pkl', delete=False) as tmp:
+            data_path = tmp.name
+        try:
+            data_df.to_pickle(data_path)
+            with ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_factor_compute_worker,
+                initargs=(data_path,),
+            ) as executor:
+                future_to_task = {
+                    executor.submit(_compute_factor_worker, task): task
+                    for task in tasks
+                }
+                for future in as_completed(future_to_task):
+                    factor_name, factor_expr = future_to_task[future]
+                    try:
+                        _, _, result, error = future.result()
+                    except Exception as e:
+                        print(f"  ✗ Error: {factor_name}: {str(e)[:80]}")
+                        failed_names.append(factor_name)
+                        continue
+
+                    if error is not None:
+                        print(f"  ✗ Error: {factor_name}: {error[:80]}")
+                        failed_names.append(factor_name)
+                        continue
+
+                    if result is not None and len(result) > 0 and not result.isna().all():
+                        results[factor_name] = result
+                        computed_count += 1
+                        print(f"  ✓ Computed: {factor_name}")
+                        if use_cache:
+                            self._save_to_cache(factor_expr, result)
+                    else:
+                        print(f"  ✗ Failed: {factor_name}")
+                        failed_names.append(factor_name)
+        finally:
+            try:
+                os.remove(data_path)
+            except OSError:
+                pass
+
+        return results, failed_names, computed_count
     
     def _validate_and_align_result(self, result: pd.Series, factor_name: str, 
                                     reference_index: Optional[pd.Index] = None) -> Optional[pd.Series]:
