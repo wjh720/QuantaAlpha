@@ -5,9 +5,11 @@ Plot cumulative return curves for model-traded assets.
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import re
+import argparse
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -33,7 +35,7 @@ def _sanitize_filename(name: str) -> str:
 def build_asset_trade_detail(position: dict, report_df: pd.DataFrame, label_data: pd.DataFrame) -> pd.DataFrame:
     """Build full asset-date panel for traded assets."""
     position_df = get_position_data(
-        position=position,
+        position=copy.deepcopy(position),
         report_normal=report_df,
         label_data=label_data,
     ).reset_index()
@@ -76,6 +78,34 @@ def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     daily_df["cum_model_ret"] = _cumprod_return(daily_df["model_ret"])
     daily_df["cum_traded_asset_ret"] = _cumprod_return(daily_df["traded_asset_ret"])
     return daily_df
+
+
+def build_asset_info(detail_df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize asset-level data needed to inspect and replot traded assets."""
+    if detail_df.empty:
+        return pd.DataFrame()
+
+    def _agg_asset(asset_df: pd.DataFrame) -> pd.Series:
+        held_df = asset_df[asset_df["is_held"]]
+        first_date = held_df["datetime"].min() if len(held_df) > 0 else pd.NaT
+        last_date = held_df["datetime"].max() if len(held_df) > 0 else pd.NaT
+        return pd.Series(
+            {
+                "start_date": asset_df["datetime"].min(),
+                "end_date": asset_df["datetime"].max(),
+                "first_held_date": first_date,
+                "last_held_date": last_date,
+                "held_days": int(asset_df["is_held"].sum()),
+                "avg_weight": held_df["weight"].mean() if len(held_df) > 0 else 0.0,
+                "max_weight": held_df["weight"].max() if len(held_df) > 0 else 0.0,
+                "total_asset_ret": asset_df["asset_ret"].fillna(0).sum(),
+                "total_model_trade_ret": asset_df["model_trade_ret"].fillna(0).sum(),
+                "plot_file": f"{_sanitize_filename(asset_df['instrument'].iloc[0])}.png",
+            }
+        )
+
+    asset_info = detail_df.groupby("instrument", sort=True, group_keys=False).apply(_agg_asset).reset_index()
+    return asset_info
 
 
 def plot_overall_curves(daily_df: pd.DataFrame, output_path: Path) -> None:
@@ -132,7 +162,7 @@ def _plot_single_asset(args: tuple[str, pd.DataFrame, str]) -> str:
     return str(output_path)
 
 
-def plot_asset_curves_parallel(detail_df: pd.DataFrame, output_dir: Path, n_jobs: int = 4) -> list[Path]:
+def plot_asset_curves_parallel(detail_df: pd.DataFrame, output_dir: Path, n_jobs: int = 100) -> list[Path]:
     """Plot per-asset curves in parallel."""
     if detail_df.empty:
         return []
@@ -156,30 +186,95 @@ def save_asset_trade_outputs(
     label_data: pd.DataFrame,
     output_dir: Path,
     file_prefix: str,
-    n_jobs: int = 4,
+    n_jobs: int = 100,
 ) -> dict[str, Path]:
     """Save asset trade detail/daily data and plots."""
+    data_outputs = save_asset_trade_data(
+        position=position,
+        report_df=report_df,
+        label_data=label_data,
+        output_dir=output_dir,
+        file_prefix=file_prefix,
+    )
+    if not data_outputs:
+        return {}
+
+    plot_outputs = plot_saved_asset_trade_outputs(
+        output_dir=output_dir,
+        file_prefix=file_prefix,
+        n_jobs=n_jobs,
+    )
+    return {**data_outputs, **plot_outputs}
+
+
+def _asset_trade_paths(output_dir: Path, file_prefix: str) -> dict[str, Path]:
+    return {
+        "detail_parquet": output_dir / f"{file_prefix}_asset_trade_detail.parquet",
+        "daily_parquet": output_dir / f"{file_prefix}_asset_trade_daily.parquet",
+        "asset_info_parquet": output_dir / f"{file_prefix}_asset_info.parquet",
+        "overall_plot": output_dir / f"{file_prefix}_model_vs_held_assets.png",
+        "asset_plot_dir": output_dir / f"{file_prefix}_asset_curves",
+    }
+
+
+def save_asset_trade_data(
+    position: dict,
+    report_df: pd.DataFrame,
+    label_data: pd.DataFrame,
+    output_dir: Path,
+    file_prefix: str,
+) -> dict[str, Path]:
+    """Step 1: save all data needed for later plotting."""
     detail_df = build_asset_trade_detail(position=position, report_df=report_df, label_data=label_data)
     if detail_df.empty:
         logger.warning("No traded asset detail available for plotting")
         return {}
 
     daily_df = build_daily_summary(detail_df)
+    asset_info_df = build_asset_info(detail_df)
     output_dir.mkdir(parents=True, exist_ok=True)
+    paths = _asset_trade_paths(output_dir, file_prefix)
 
-    detail_path = output_dir / f"{file_prefix}_asset_trade_detail.csv"
-    daily_path = output_dir / f"{file_prefix}_asset_trade_daily.csv"
-    overall_plot_path = output_dir / f"{file_prefix}_model_vs_held_assets.png"
-    asset_plot_dir = output_dir / f"{file_prefix}_asset_curves"
-
-    detail_df.to_csv(detail_path, index=False)
-    daily_df.to_csv(daily_path, index=False)
-    plot_overall_curves(daily_df, overall_plot_path)
-    plot_asset_curves_parallel(detail_df, asset_plot_dir, n_jobs=n_jobs)
+    detail_df.to_parquet(paths["detail_parquet"], index=False)
+    daily_df.to_parquet(paths["daily_parquet"], index=False)
+    asset_info_df.to_parquet(paths["asset_info_parquet"], index=False)
 
     return {
-        "detail_csv": detail_path,
-        "daily_csv": daily_path,
-        "overall_plot": overall_plot_path,
-        "asset_plot_dir": asset_plot_dir,
+        "detail_parquet": paths["detail_parquet"],
+        "daily_parquet": paths["daily_parquet"],
+        "asset_info_parquet": paths["asset_info_parquet"],
     }
+
+
+def plot_saved_asset_trade_outputs(output_dir: Path, file_prefix: str, n_jobs: int = 100) -> dict[str, Path]:
+    """Step 2: load saved data and generate plots."""
+    paths = _asset_trade_paths(output_dir, file_prefix)
+    daily_df = pd.read_parquet(paths["daily_parquet"])
+    detail_df = pd.read_parquet(paths["detail_parquet"])
+
+    plot_overall_curves(daily_df, paths["overall_plot"])
+    plot_asset_curves_parallel(detail_df, paths["asset_plot_dir"], n_jobs=n_jobs)
+
+    return {
+        "overall_plot": paths["overall_plot"],
+        "asset_plot_dir": paths["asset_plot_dir"],
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Plot saved backtest asset trade curves")
+    parser.add_argument("--output-dir", required=True, help="Backtest output directory")
+    parser.add_argument("--prefix", required=True, help="File prefix used by backtest output")
+    parser.add_argument("--n-jobs", type=int, default=100, help="Parallel asset plotting workers")
+    args = parser.parse_args()
+
+    outputs = plot_saved_asset_trade_outputs(
+        output_dir=Path(args.output_dir),
+        file_prefix=args.prefix,
+        n_jobs=args.n_jobs,
+    )
+    print({key: str(value) for key, value in outputs.items()})
+
+
+if __name__ == "__main__":
+    main()

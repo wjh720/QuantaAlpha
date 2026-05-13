@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 import time
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -651,9 +652,12 @@ class BacktestRunner:
                             try:
                                 from qlib.contrib.report.analysis_position.parse_position import parse_position
 
-                                from .plot_long_asset_curves import save_asset_trade_outputs
+                                from .plot_long_asset_curves import (
+                                    plot_saved_asset_trade_outputs,
+                                    save_asset_trade_data,
+                                )
 
-                                parsed_position_df = parse_position(positions_df)
+                                parsed_position_df = parse_position(copy.deepcopy(positions_df))
                                 traded_assets = sorted(
                                     parsed_position_df.index.get_level_values('instrument').unique().tolist()
                                 )
@@ -672,23 +676,34 @@ class BacktestRunner:
 
                                 n_jobs = self.config.get('plot', {}).get(
                                     'n_jobs',
-                                    self.config.get('factor_calculation', {}).get('n_jobs', 4)
+                                    100
                                 )
-                                plot_outputs = save_asset_trade_outputs(
+                                data_outputs = save_asset_trade_data(
                                     position=positions_df,
                                     report_df=report_df,
                                     label_data=label_data,
                                     output_dir=output_dir,
                                     file_prefix=file_prefix,
-                                    n_jobs=n_jobs,
                                 )
-                                if plot_outputs:
+                                if data_outputs:
                                     logger.debug(
-                                        "  Asset trade outputs saved: %s",
-                                        {k: str(v) for k, v in plot_outputs.items()}
+                                        "  Asset trade data saved: %s",
+                                        {k: str(v) for k, v in data_outputs.items()}
                                     )
+                                    try:
+                                        plot_outputs = plot_saved_asset_trade_outputs(
+                                            output_dir=output_dir,
+                                            file_prefix=file_prefix,
+                                            n_jobs=n_jobs,
+                                        )
+                                        logger.debug(
+                                            "  Asset trade plots saved: %s",
+                                            {k: str(v) for k, v in plot_outputs.items()}
+                                        )
+                                    except Exception as plot_err:
+                                        logger.warning(f"Failed to plot saved asset trade curves: {plot_err}")
                             except Exception as plot_err:
-                                logger.warning(f"Failed to save asset trade curves: {plot_err}")
+                                logger.warning(f"Failed to save asset trade data: {plot_err}")
 
                             analysis = risk_analysis(excess_return_with_cost)
                             

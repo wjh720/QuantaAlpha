@@ -157,3 +157,6 @@ factor_calculation:
   recompute_backend: "thread"
   recompute_n_jobs: 16
   data_file: null  # When null, data is fetched from qlib
+
+plot:
+  n_jobs: 100
