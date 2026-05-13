@@ -21,7 +21,6 @@ from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_datetime64_any_dtype
 
 # Add project root (from quantaalpha/backtest/ up two levels)
 project_root = Path(__file__).resolve().parents[2]
@@ -146,43 +145,19 @@ class CustomFactorCalculator:
                     result = result['factor']
                 else:
                     result = result.iloc[:, 0]
-
-            result.index = self._normalize_index(result.index)
-            return result.sort_index()
+            
+            # Standard order: (datetime, instrument)
+            if isinstance(result.index, pd.MultiIndex):
+                cache_idx_names = list(result.index.names)
+                expected_order = ['datetime', 'instrument']
+                if cache_idx_names != expected_order and set(cache_idx_names) == set(expected_order):
+                    result = result.swaplevel()
+                    result = result.sort_index()
+            
+            return result
         except Exception as e:
             logger.debug(f"Process cached result failed [{source}]: {e}")
             return None
-
-    def _normalize_index(self, index: pd.Index) -> pd.Index:
-        """Normalize index to standard MultiIndex(datetime, instrument)."""
-        if not isinstance(index, pd.MultiIndex) or index.nlevels != 2:
-            return index
-
-        names = list(index.names)
-        level0 = index.get_level_values(0)
-        level1 = index.get_level_values(1)
-
-        level0_is_dt = is_datetime64_any_dtype(level0)
-        level1_is_dt = is_datetime64_any_dtype(level1)
-
-        # Cached H5 files may have unnamed reversed MultiIndex: (instrument, datetime).
-        if (names == ['instrument', 'datetime']) or (not level0_is_dt and level1_is_dt):
-            index = index.swaplevel()
-            names = list(index.names)
-            level0 = index.get_level_values(0)
-            level1 = index.get_level_values(1)
-
-        # Normalize datetime level dtype when stored as object/string.
-        if not is_datetime64_any_dtype(level0):
-            try:
-                dt_level = pd.to_datetime(level0)
-                index = pd.MultiIndex.from_arrays([dt_level, level1], names=['datetime', 'instrument'])
-            except Exception:
-                index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
-        else:
-            index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
-
-        return index
     
     def _save_to_cache(self, expr: str, result: pd.Series):
         """Save factor values to cache."""
@@ -503,11 +478,9 @@ class CustomFactorCalculator:
         target_idx = reference_index
         if target_idx is None:
             try:
-                target_idx = self._normalize_index(self.data_df.index)
+                target_idx = self.data_df.index
             except Exception:
                 return result if len(result) > 0 and not result.isna().all() else None
-
-        result.index = self._normalize_index(result.index)
         
         # Align index (duplicate-safe)
         if not result.index.equals(target_idx):
