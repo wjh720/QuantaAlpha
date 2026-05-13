@@ -267,6 +267,112 @@ class BacktestRunner:
         logger.debug(f"  Qlib mode: {len(expressions)} factors, train={dataset_config['segments']['train']}")
         
         return dataset
+
+    def _compute_long_hold_daily_return(
+        self,
+        positions: Dict,
+        start_time: str,
+        end_time: str,
+    ) -> pd.Series:
+        """Estimate daily return of the actual long book from backtest positions."""
+        from qlib.contrib.report.analysis_position.parse_position import parse_position
+        from qlib.data import D
+
+        position_df = parse_position(positions)
+        position_df = self._normalize_datetime_instrument_index(position_df)
+        position_df = position_df[position_df["status"] != -1]
+        if position_df.empty:
+            return pd.Series(dtype=float, name="daily_long_hold_return")
+
+        instruments = position_df.index.get_level_values("instrument").unique().tolist()
+        label_df = D.features(
+            instruments,
+            ["Ref($close, -1)/$close - 1"],
+            start_time=start_time,
+            end_time=end_time,
+            freq="day",
+        )
+        label_df.columns = ["next_ret"]
+        label_df = self._normalize_datetime_instrument_index(label_df)
+
+        merged = position_df[["weight"]].join(label_df[["next_ret"]], how="left")
+        merged = merged.dropna(subset=["weight", "next_ret"])
+        if merged.empty:
+            return pd.Series(dtype=float, name="daily_long_hold_return")
+
+        long_hold_return = merged.groupby(level="datetime").apply(
+            lambda x: (x["weight"] * x["next_ret"]).sum() / x["weight"].sum() if x["weight"].sum() > 0 else np.nan
+        )
+        long_hold_return.name = "daily_long_hold_return"
+        return long_hold_return.sort_index()
+
+    def _save_backtest_curves(
+        self,
+        report_df: pd.DataFrame,
+        output_dir: Path,
+        file_prefix: str,
+        positions: Optional[Dict] = None,
+    ) -> None:
+        """Save backtest CSV and a comparison plot including long-book CRP."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        save_df = pd.DataFrame(index=report_df.index.copy())
+        portfolio_return = report_df["return"].replace([np.inf, -np.inf], np.nan).fillna(0)
+        bench_return = report_df["bench"].replace([np.inf, -np.inf], np.nan).fillna(0) if "bench" in report_df.columns else pd.Series(0, index=report_df.index)
+        cost = report_df["cost"].replace([np.inf, -np.inf], np.nan).fillna(0) if "cost" in report_df.columns else pd.Series(0, index=report_df.index)
+        excess_return = portfolio_return - bench_return - cost
+
+        save_df["daily_portfolio_return"] = portfolio_return
+        save_df["daily_benchmark_return"] = bench_return
+        save_df["daily_cost"] = cost
+        save_df["daily_excess_return"] = excess_return
+        save_df["cumulative_portfolio_return"] = (1 + portfolio_return).cumprod() - 1
+        save_df["cumulative_benchmark_return"] = (1 + bench_return).cumprod() - 1
+        save_df["cumulative_excess_return"] = excess_return.cumsum()
+
+        if positions:
+            long_hold_return = self._compute_long_hold_daily_return(
+                positions,
+                start_time=self.config["backtest"]["backtest"]["start_time"],
+                end_time=self.config["backtest"]["backtest"]["end_time"],
+            )
+            save_df = save_df.join(long_hold_return, how="left")
+            if "daily_long_hold_return" in save_df.columns:
+                save_df["daily_long_hold_return"] = save_df["daily_long_hold_return"].fillna(0)
+                save_df["long_hold_crp"] = (1 + save_df["daily_long_hold_return"]).cumprod() - 1
+
+        save_df.index.name = "date"
+        csv_path = output_dir / f"{file_prefix}_cumulative_excess.csv"
+        save_df.to_csv(csv_path)
+        logger.debug(f"  Backtest curve CSV saved: {csv_path}")
+
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+            ax.plot(save_df.index, save_df["cumulative_portfolio_return"], label="Backtest", linewidth=1.8)
+            ax.plot(save_df.index, save_df["cumulative_benchmark_return"], label="Benchmark", linewidth=1.2)
+            ax.plot(save_df.index, save_df["cumulative_excess_return"], label="Excess", linewidth=1.4)
+            if "long_hold_crp" in save_df.columns:
+                ax.plot(save_df.index, save_df["long_hold_crp"], label="Hold Long CRP", linewidth=1.4)
+
+            ax.set_title(f"{file_prefix} Backtest Curves")
+            ax.set_xlabel("Date")
+            ax.set_ylabel("Cumulative Return")
+            ax.grid(True, alpha=0.25)
+            ax.legend()
+            fig.autofmt_xdate()
+            fig.tight_layout()
+
+            plot_path = output_dir / f"{file_prefix}_backtest_curves.png"
+            fig.savefig(plot_path, dpi=160)
+            plt.close(fig)
+            logger.debug(f"  Backtest curve plot saved: {plot_path}")
+        except Exception as plot_err:
+            logger.warning(f"Failed to save backtest plot: {plot_err}")
     
     def _create_dataset_with_computed_factors(self,
                                               factor_expressions: Dict[str, str],
@@ -695,21 +801,9 @@ class BacktestRunner:
                         
                         if len(excess_return_with_cost) > 0:
                             try:
-                                daily_df = report_df.copy()
-                                daily_df['excess_return'] = excess_return_with_cost
-                                
                                 output_dir = Path(self.config['experiment'].get('output_dir', './backtest_v2_results'))
-                                output_dir.mkdir(parents=True, exist_ok=True)
-                                
                                 file_prefix = output_name if output_name else exp_name
-                                csv_path = output_dir / f"{file_prefix}_cumulative_excess.csv"
-                                save_df = daily_df[['excess_return']].copy()
-                                save_df.columns = ['daily_excess_return']
-                                save_df['cumulative_excess_return'] = save_df['daily_excess_return'].cumsum()
-                                
-                                save_df.index.name = 'date'
-                                save_df.to_csv(csv_path)
-                                logger.debug(f"  Daily excess return saved: {csv_path}")
+                                self._save_backtest_curves(report_df, output_dir, file_prefix, positions_df)
                             except Exception as csv_err:
                                 logger.warning(f"Failed to save daily CSV: {csv_err}")
 
