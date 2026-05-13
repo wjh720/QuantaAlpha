@@ -305,8 +305,16 @@ def plot_saved_asset_trade_outputs(output_dir: Path, file_prefix: str, n_jobs: i
 
 def main():
     parser = argparse.ArgumentParser(description="Plot saved backtest asset trade curves")
-    parser.add_argument("--output-dir", required=True, help="Backtest output directory")
-    parser.add_argument("--prefix", required=True, help="File prefix used by backtest output")
+    parser.add_argument(
+        "--output-dir",
+        default="data/results/backtest_v2_results",
+        help="Backtest output directory",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="all_factors_library",
+        help="File prefix used by backtest output",
+    )
     parser.add_argument("--n-jobs", type=int, default=100, help="Parallel asset plotting workers")
     args = parser.parse_args()
 
