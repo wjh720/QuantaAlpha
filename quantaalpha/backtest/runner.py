@@ -51,37 +51,6 @@ class BacktestRunner:
         self._qlib_initialized = True
         logger.info(f"Qlib initialized: {provider_uri} (region={region})")
 
-    @staticmethod
-    def _normalize_datetime_instrument_index(obj):
-        """Normalize a 2-level MultiIndex to (datetime, instrument)."""
-        if not hasattr(obj, "index") or not isinstance(obj.index, pd.MultiIndex) or obj.index.nlevels != 2:
-            return obj
-
-        index = obj.index
-        names = list(index.names)
-        level0 = index.get_level_values(0)
-        level1 = index.get_level_values(1)
-
-        level0_is_dt = pd.api.types.is_datetime64_any_dtype(level0)
-        level1_is_dt = pd.api.types.is_datetime64_any_dtype(level1)
-
-        if names == ["instrument", "datetime"] or (not level0_is_dt and level1_is_dt):
-            index = index.swaplevel()
-            level0 = index.get_level_values(0)
-            level1 = index.get_level_values(1)
-
-        if not pd.api.types.is_datetime64_any_dtype(level0):
-            level0 = pd.to_datetime(level0)
-
-        normalized_index = pd.MultiIndex.from_arrays(
-            [level0, level1],
-            names=["datetime", "instrument"],
-        )
-
-        obj = obj.copy()
-        obj.index = normalized_index
-        return obj.sort_index()
-
     def run(self,
             factor_source: Optional[str] = None,
             factor_json: Optional[List[str]] = None,
@@ -292,7 +261,7 @@ class BacktestRunner:
                 df = df.sort_index()
                 logger.debug(f"  {df_name} index swapped to (datetime, instrument)")
             
-            return self._normalize_datetime_instrument_index(df)
+            return df
         
         features_df = _normalize_multiindex(features_df, "features")
         label_df = _normalize_multiindex(label_df, "label")
@@ -348,7 +317,6 @@ class BacktestRunner:
             
             merged = merged.set_index([dt_col, inst_col])
             merged.index.names = ['datetime', 'instrument']
-            merged = self._normalize_datetime_instrument_index(merged)
             
             feature_cols = [c for c in features_df.columns if c in merged.columns]
             label_cols = [c for c in label_df.columns if c in merged.columns]
@@ -357,9 +325,6 @@ class BacktestRunner:
         else:
             features_df = features_df.loc[common_index]
             label_df = label_df.loc[common_index]
-
-        features_df = self._normalize_datetime_instrument_index(features_df)
-        label_df = self._normalize_datetime_instrument_index(label_df)
         
         logger.debug(f"  Data rows: {len(features_df)}")
         if len(features_df) == 0:
@@ -540,7 +505,6 @@ class BacktestRunner:
             
             # Generate prediction
             pred = model.predict(dataset)
-            pred = self._normalize_datetime_instrument_index(pred)
             logger.debug(f"  Pred shape: {pred.shape}")
             
             # Save prediction
