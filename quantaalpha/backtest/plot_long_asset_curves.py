@@ -24,8 +24,8 @@ import matplotlib.pyplot as plt
 logger = logging.getLogger(__name__)
 
 
-def _cumprod_return(series: pd.Series) -> pd.Series:
-    return (1.0 + series.fillna(0)).cumprod() - 1.0
+def _cumsum_return(series: pd.Series) -> pd.Series:
+    return series.fillna(0).cumsum()
 
 
 def _sanitize_filename(name: str) -> str:
@@ -75,8 +75,8 @@ def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     daily_df = detail_df.groupby("datetime", sort=True, group_keys=False).apply(_agg_day).reset_index()
-    daily_df["cum_model_ret"] = _cumprod_return(daily_df["model_ret"])
-    daily_df["cum_traded_asset_ret"] = _cumprod_return(daily_df["traded_asset_ret"])
+    daily_df["cum_model_ret"] = _cumsum_return(daily_df["model_ret"])
+    daily_df["cum_traded_asset_ret"] = _cumsum_return(daily_df["traded_asset_ret"])
     return daily_df
 
 
@@ -136,23 +136,65 @@ def plot_overall_curves(daily_df: pd.DataFrame, output_path: Path) -> None:
 def _plot_single_asset(args: tuple[str, pd.DataFrame, str]) -> str:
     asset, asset_df, output_dir = args
     asset_df = asset_df.sort_values("datetime").copy()
-    asset_df["cum_asset_ret"] = _cumprod_return(asset_df["asset_ret"])
-    asset_df["cum_model_trade_ret"] = _cumprod_return(asset_df["model_trade_ret"])
+    asset_df["cum_asset_ret"] = _cumsum_return(asset_df["asset_ret"])
+    asset_df["cum_model_trade_ret"] = _cumsum_return(asset_df["model_trade_ret"])
 
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.plot(asset_df["datetime"], asset_df["cum_asset_ret"], label=f"{asset} cumulative ret", linewidth=2.0)
-    ax.plot(
+    fig, (ax_ret, ax_weight) = plt.subplots(
+        2,
+        1,
+        figsize=(14, 9),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 1]},
+    )
+    ax_ret_right = ax_ret.twinx()
+
+    ret_line_left = ax_ret.plot(
+        asset_df["datetime"],
+        asset_df["cum_asset_ret"],
+        label=f"{asset} cumulative ret",
+        linewidth=2.0,
+        color="tab:blue",
+    )[0]
+    ret_line_right = ax_ret_right.plot(
         asset_df["datetime"],
         asset_df["cum_model_trade_ret"],
         label=f"{asset} model traded cumulative ret",
         linewidth=1.8,
         alpha=0.9,
+        color="tab:orange",
+    )[0]
+
+    ax_ret.set_title(f"{asset} Return vs Model Traded Return")
+    ax_ret.set_ylabel(f"{asset} cumulative ret", color="tab:blue")
+    ax_ret_right.set_ylabel("Model traded cumulative ret", color="tab:orange")
+    ax_ret.tick_params(axis="y", labelcolor="tab:blue")
+    ax_ret_right.tick_params(axis="y", labelcolor="tab:orange")
+    ax_ret.grid(True, alpha=0.25)
+    ax_ret.legend(
+        [ret_line_left, ret_line_right],
+        [ret_line_left.get_label(), ret_line_right.get_label()],
+        loc="upper left",
     )
-    ax.set_title(f"{asset} Return vs Model Traded Return")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Cumulative Return")
-    ax.grid(True, alpha=0.25)
-    ax.legend()
+
+    ax_weight.plot(
+        asset_df["datetime"],
+        asset_df["weight"].fillna(0),
+        label="Position weight",
+        linewidth=1.6,
+        color="tab:green",
+    )
+    ax_weight.fill_between(
+        asset_df["datetime"],
+        0,
+        asset_df["weight"].fillna(0),
+        color="tab:green",
+        alpha=0.2,
+    )
+    ax_weight.set_xlabel("Date")
+    ax_weight.set_ylabel("Weight")
+    ax_weight.grid(True, alpha=0.25)
+    ax_weight.legend(loc="upper left")
+
     fig.autofmt_xdate()
     fig.tight_layout()
 
