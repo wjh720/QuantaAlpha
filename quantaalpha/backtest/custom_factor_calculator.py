@@ -15,14 +15,13 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import warnings
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype
 
 # Add project root (from quantaalpha/backtest/ up two levels)
 project_root = Path(__file__).resolve().parents[2]
@@ -37,27 +36,6 @@ os.environ.setdefault('JOBLIB_START_METHOD', 'loky')
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR = Path(os.environ.get("FACTOR_CACHE_DIR", "data/results/factor_cache"))
-_WORKER_DATA_DF: Optional[pd.DataFrame] = None
-
-
-def _init_factor_compute_worker(data_path: str):
-    global _WORKER_DATA_DF
-    _WORKER_DATA_DF = pd.read_pickle(data_path)
-
-
-def _compute_factor_worker(task: tuple[str, str]) -> tuple[str, str, Optional[pd.Series], Optional[str]]:
-    factor_name, factor_expr = task
-    try:
-        calculator = CustomFactorCalculator(
-            data_df=_WORKER_DATA_DF,
-            cache_dir=DEFAULT_CACHE_DIR,
-            auto_extract_cache=False,
-            config=None,
-        )
-        result = calculator.calculate_factor(factor_name, factor_expr)
-        return factor_name, factor_expr, result, None
-    except Exception as e:
-        return factor_name, factor_expr, None, str(e)
 
 
 class CustomFactorCalculator:
@@ -168,19 +146,43 @@ class CustomFactorCalculator:
                     result = result['factor']
                 else:
                     result = result.iloc[:, 0]
-            
-            # Standard order: (datetime, instrument)
-            if isinstance(result.index, pd.MultiIndex):
-                cache_idx_names = list(result.index.names)
-                expected_order = ['datetime', 'instrument']
-                if cache_idx_names != expected_order and set(cache_idx_names) == set(expected_order):
-                    result = result.swaplevel()
-                    result = result.sort_index()
-            
-            return result
+
+            result.index = self._normalize_index(result.index)
+            return result.sort_index()
         except Exception as e:
             logger.debug(f"Process cached result failed [{source}]: {e}")
             return None
+
+    def _normalize_index(self, index: pd.Index) -> pd.Index:
+        """Normalize index to standard MultiIndex(datetime, instrument)."""
+        if not isinstance(index, pd.MultiIndex) or index.nlevels != 2:
+            return index
+
+        names = list(index.names)
+        level0 = index.get_level_values(0)
+        level1 = index.get_level_values(1)
+
+        level0_is_dt = is_datetime64_any_dtype(level0)
+        level1_is_dt = is_datetime64_any_dtype(level1)
+
+        # Cached H5 files may have unnamed reversed MultiIndex: (instrument, datetime).
+        if (names == ['instrument', 'datetime']) or (not level0_is_dt and level1_is_dt):
+            index = index.swaplevel()
+            names = list(index.names)
+            level0 = index.get_level_values(0)
+            level1 = index.get_level_values(1)
+
+        # Normalize datetime level dtype when stored as object/string.
+        if not is_datetime64_any_dtype(level0):
+            try:
+                dt_level = pd.to_datetime(level0)
+                index = pd.MultiIndex.from_arrays([dt_level, level1], names=['datetime', 'instrument'])
+            except Exception:
+                index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
+        else:
+            index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
+
+        return index
     
     def _save_to_cache(self, expr: str, result: pd.Series):
         """Save factor values to cache."""
@@ -348,11 +350,6 @@ class CustomFactorCalculator:
         failed_names = []
         total = len(factors)
         need_compute_factors = []
-        factor_info_by_name = {
-            factor_info.get('factor_name', 'unknown'): factor_info
-            for factor_info in factors
-            if factor_info.get('factor_expression', '')
-        }
         
         # Pass 1: load from cache
         for i, factor_info in enumerate(factors):
@@ -400,249 +397,128 @@ class CustomFactorCalculator:
                     print(f"  Skipped: {', '.join(skipped_names)}")
             else:
                 print(f"  Computing {len(need_compute_factors)} factors from expressions...")
-                t0 = _time.time()
-                computed_results, computed_failed_names, new_compute_count = self._calculate_factors_parallel(
-                    need_compute_factors=need_compute_factors,
-                    use_cache=use_cache,
-                )
-                elapsed = _time.time() - t0
-                results.update(computed_results)
-                success_count += len(computed_results)
-                fail_count += len(computed_failed_names)
-                failed_names.extend(computed_failed_names)
-                compute_count += new_compute_count
-                print(
-                    f"  Parallel recompute done: success {len(computed_results)}, "
-                    f"failed {len(computed_failed_names)} ({elapsed:.1f}s)"
-                )
-        
-        if not results:
-            print(f"Factor load done: success {success_count}, failed {fail_count} | "
-                  f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
-            if failed_names:
-                print(f"  Failed: {', '.join(failed_names)}")
-            return pd.DataFrame()
-        
-        # Align results to common index
-        aligned_results = {}
-        invalid_cache_names = []
-        reference_index = self.data_df.index
-        
-        for name, series in results.items():
-            validated = self._validate_and_align_result(series, name, reference_index)
-            if validated is not None:
-                aligned_results[name] = validated
-            else:
-                invalid_cache_names.append(name)
-
-        if invalid_cache_names:
-            success_count -= len(invalid_cache_names)
-            if skip_compute:
-                print(
-                    f"  Skipping {len(invalid_cache_names)} cache-mismatch factors "
-                    f"(skip_compute=True): {', '.join(invalid_cache_names)}"
-                )
-                fail_count += len(invalid_cache_names)
-                failed_names.extend(invalid_cache_names)
-            else:
-                invalid_factor_infos = [
-                    (idx, factor_info_by_name[name])
-                    for idx, name in enumerate(invalid_cache_names)
-                    if name in factor_info_by_name
-                ]
-                if invalid_factor_infos:
-                    print(
-                        f"  Recomputing {len(invalid_factor_infos)} cache-mismatch factors in parallel..."
-                    )
+                
+                for idx, (orig_i, factor_info) in enumerate(need_compute_factors):
+                    factor_name = factor_info.get('factor_name', 'unknown')
+                    factor_expr = factor_info.get('factor_expression', '')
+                    
+                    print(f"  Compute [{idx+1}/{len(need_compute_factors)}]: {factor_name} ...", end='', flush=True)
                     t0 = _time.time()
-                    recomputed_results, recomputed_failed_names, new_compute_count = self._calculate_factors_parallel(
-                        need_compute_factors=invalid_factor_infos,
-                        use_cache=use_cache,
-                    )
+                    
+                    try:
+                        import signal as _signal
+                        
+                        class _FactorTimeout(Exception):
+                            pass
+                        
+                        def _timeout_handler(signum, frame):
+                            raise _FactorTimeout()
+                        
+                        old_handler = None
+                        try:
+                            old_handler = _signal.signal(_signal.SIGALRM, _timeout_handler)
+                            _signal.alarm(120)
+                        except (AttributeError, ValueError):
+                            pass
+                        
+                        result = self.calculate_factor(factor_name, factor_expr)
+                        
+                        try:
+                            _signal.alarm(0)
+                            if old_handler is not None:
+                                _signal.signal(_signal.SIGALRM, old_handler)
+                        except (AttributeError, ValueError):
+                            pass
+                        
+                    except _FactorTimeout:
+                        elapsed = _time.time() - t0
+                        print(f" ✗ Timeout ({elapsed:.1f}s)")
+                        fail_count += 1
+                        failed_names.append(f"{factor_name}(timeout)")
+                        try:
+                            _signal.alarm(0)
+                            if old_handler is not None:
+                                _signal.signal(_signal.SIGALRM, old_handler)
+                        except (AttributeError, ValueError):
+                            pass
+                        continue
+                    except Exception as e:
+                        elapsed = _time.time() - t0
+                        print(f" ✗ Error ({elapsed:.1f}s): {str(e)[:80]}")
+                        fail_count += 1
+                        failed_names.append(factor_name)
+                        continue
+                    
                     elapsed = _time.time() - t0
-                    compute_count += new_compute_count
-                    revalidated_success_count = 0
-                    revalidated_failed_names = list(recomputed_failed_names)
-
-                    for name, series in recomputed_results.items():
-                        validated = self._validate_and_align_result(series, name, reference_index)
-                        if validated is not None:
-                            aligned_results[name] = validated
-                            revalidated_success_count += 1
+                    
+                    if result is not None and len(result) > 0:
+                        if not result.isna().all():
+                            results[factor_name] = result
+                            success_count += 1
+                            compute_count += 1
+                            print(f" ✓ ({elapsed:.1f}s)")
+                            if use_cache:
+                                self._save_to_cache(factor_expr, result)
                         else:
-                            revalidated_failed_names.append(name)
-
-                    success_count += revalidated_success_count
-                    fail_count += len(revalidated_failed_names)
-                    failed_names.extend(revalidated_failed_names)
-
-                    print(
-                        f"  Cache-mismatch recompute done: success {revalidated_success_count}, "
-                        f"failed {len(revalidated_failed_names)} ({elapsed:.1f}s)"
-                    )
+                            fail_count += 1
+                            failed_names.append(factor_name)
+                            print(f" ✗ All NaN ({elapsed:.1f}s)")
+                    else:
+                        fail_count += 1
+                        failed_names.append(factor_name)
+                        print(f" ✗ Failed ({elapsed:.1f}s)")
         
         print(f"Factor load done: success {success_count}, failed {fail_count} | "
               f"H5 cache {cache_location_hit_count}, MD5 cache {cache_hit_count}, computed {compute_count}")
         if failed_names:
             print(f"  Failed: {', '.join(failed_names)}")
-
+        
+        if not results:
+            return pd.DataFrame()
+        
+        # Align results to common index
+        aligned_results = {}
+        reference_index = None
+        
+        for name, series in results.items():
+            if reference_index is None:
+                validated = self._validate_and_align_result(
+                    series,
+                    name,
+                    reference_index=None,
+                    allow_data_fallback=False,
+                )
+            else:
+                validated = self._validate_and_align_result(series, name, reference_index)
+            if validated is not None:
+                aligned_results[name] = validated
+                if reference_index is None:
+                    reference_index = validated.index
+        
         if aligned_results:
             result_df = pd.DataFrame(aligned_results)
             logger.debug(f"  Result DataFrame: {result_df.shape}")
             return result_df
         
         return pd.DataFrame()
-
-    def _calculate_factors_parallel(
-        self,
-        need_compute_factors: List[Tuple[int, Dict]],
-        use_cache: bool,
-    ) -> tuple[dict[str, pd.Series], list[str], int]:
-        """Compute uncached factors in parallel."""
-        factor_config = self._config.get('factor_calculation', {}) if self._config else {}
-        backend = str(factor_config.get('recompute_backend', 'thread')).lower()
-        n_jobs = int(factor_config.get('recompute_n_jobs', factor_config.get('n_jobs', 4)))
-
-        tasks: list[tuple[str, str]] = []
-        for _, factor_info in need_compute_factors:
-            factor_name = factor_info.get('factor_name', 'unknown')
-            factor_expr = factor_info.get('factor_expression', '')
-            if factor_expr:
-                tasks.append((factor_name, factor_expr))
-
-        if not tasks:
-            return {}, [], 0
-
-        _ = self.data_df
-        max_workers = max(1, min(n_jobs, len(tasks)))
-        print(f"  Parallel recompute backend={backend}, workers={max_workers}")
-        if backend == 'process' and max_workers > (os.cpu_count() or 1) * 2:
-            logger.warning(
-                "recompute_backend=process with workers=%s may be memory-heavy on large factor data",
-                max_workers,
-            )
-
-        if backend == 'process':
-            return self._calculate_factors_parallel_process(tasks, use_cache, max_workers)
-        return self._calculate_factors_parallel_thread(tasks, use_cache, max_workers)
-
-    def _calculate_factors_parallel_thread(
-        self,
-        tasks: List[tuple[str, str]],
-        use_cache: bool,
-        max_workers: int,
-    ) -> tuple[dict[str, pd.Series], list[str], int]:
-        """Compute factors with threads to avoid duplicating the large source DataFrame."""
-        results: dict[str, pd.Series] = {}
-        failed_names: list[str] = []
-        computed_count = 0
-
-        if max_workers == 1:
-            for factor_name, factor_expr in tasks:
-                result = self.calculate_factor(factor_name, factor_expr)
-                if result is not None and len(result) > 0 and not result.isna().all():
-                    results[factor_name] = result
-                    computed_count += 1
-                    if use_cache:
-                        self._save_to_cache(factor_expr, result)
-                else:
-                    failed_names.append(factor_name)
-            return results, failed_names, computed_count
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_task = {
-                executor.submit(self.calculate_factor, factor_name, factor_expr): (factor_name, factor_expr)
-                for factor_name, factor_expr in tasks
-            }
-            for future in as_completed(future_to_task):
-                factor_name, factor_expr = future_to_task[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    print(f"  ✗ Error: {factor_name}: {str(e)[:80]}")
-                    failed_names.append(factor_name)
-                    continue
-
-                if result is not None and len(result) > 0 and not result.isna().all():
-                    results[factor_name] = result
-                    computed_count += 1
-                    print(f"  ✓ Computed: {factor_name}")
-                    if use_cache:
-                        self._save_to_cache(factor_expr, result)
-                else:
-                    print(f"  ✗ Failed: {factor_name}")
-                    failed_names.append(factor_name)
-
-        return results, failed_names, computed_count
-
-    def _calculate_factors_parallel_process(
-        self,
-        tasks: List[tuple[str, str]],
-        use_cache: bool,
-        max_workers: int,
-    ) -> tuple[dict[str, pd.Series], list[str], int]:
-        """Compute factors with processes."""
-        results: dict[str, pd.Series] = {}
-        failed_names: list[str] = []
-        computed_count = 0
-
-        data_df = self.data_df
-        with tempfile.NamedTemporaryFile(prefix='qa_factor_data_', suffix='.pkl', delete=False) as tmp:
-            data_path = tmp.name
-        try:
-            data_df.to_pickle(data_path)
-            with ProcessPoolExecutor(
-                max_workers=max_workers,
-                initializer=_init_factor_compute_worker,
-                initargs=(data_path,),
-            ) as executor:
-                future_to_task = {
-                    executor.submit(_compute_factor_worker, task): task
-                    for task in tasks
-                }
-                for future in as_completed(future_to_task):
-                    factor_name, factor_expr = future_to_task[future]
-                    try:
-                        _, _, result, error = future.result()
-                    except Exception as e:
-                        print(f"  ✗ Error: {factor_name}: {str(e)[:80]}")
-                        failed_names.append(factor_name)
-                        continue
-
-                    if error is not None:
-                        print(f"  ✗ Error: {factor_name}: {error[:80]}")
-                        failed_names.append(factor_name)
-                        continue
-
-                    if result is not None and len(result) > 0 and not result.isna().all():
-                        results[factor_name] = result
-                        computed_count += 1
-                        print(f"  ✓ Computed: {factor_name}")
-                        if use_cache:
-                            self._save_to_cache(factor_expr, result)
-                    else:
-                        print(f"  ✗ Failed: {factor_name}")
-                        failed_names.append(factor_name)
-        finally:
-            try:
-                os.remove(data_path)
-            except OSError:
-                pass
-
-        return results, failed_names, computed_count
     
-    def _validate_and_align_result(self, result: pd.Series, factor_name: str, 
-                                    reference_index: Optional[pd.Index] = None) -> Optional[pd.Series]:
+    def _validate_and_align_result(self, result: pd.Series, factor_name: str,
+                                    reference_index: Optional[pd.Index] = None,
+                                    allow_data_fallback: bool = True) -> Optional[pd.Series]:
         """Validate and align cached result index."""
         if result is None:
             return None
-        
+
+        result.index = self._normalize_index(result.index)
+
         target_idx = reference_index
-        if target_idx is None:
+        if target_idx is None and allow_data_fallback:
             try:
-                target_idx = self.data_df.index
+                target_idx = self._normalize_index(self.data_df.index)
             except Exception:
                 return result if len(result) > 0 and not result.isna().all() else None
+        elif target_idx is None:
+            return result if len(result) > 0 and not result.isna().all() else None
         
         # Align index (duplicate-safe)
         if not result.index.equals(target_idx):
@@ -713,6 +589,8 @@ class CustomFactorDataLoader:
 
 def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
     """Load stock data from Qlib."""
+    import time
+
     import qlib
     from qlib.data import D
     
@@ -735,10 +613,22 @@ def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
     start_time = data_config.get('start_time', '2016-01-01')
     end_time = data_config.get('end_time', '2025-12-31')
     market = data_config.get('market', 'csi300')
-    
+
+    print(
+        f"  Loading Qlib stock data: market={market}, range={start_time}~{end_time}, region={region}"
+    )
+
+    t0 = time.time()
+    print(f"  [1/2] Resolving instruments for market={market} ...", flush=True)
     stock_list = D.instruments(market)
-    
+    print(f"  [1/2] Instruments resolved in {time.time() - t0:.1f}s", flush=True)
+
     fields = ['$open', '$high', '$low', '$close', '$volume', '$vwap']
+    t1 = time.time()
+    print(
+        f"  [2/2] Loading features {fields} for {market} from {start_time} to {end_time} ...",
+        flush=True,
+    )
     df = D.features(
         stock_list,
         fields,
@@ -746,11 +636,16 @@ def get_qlib_stock_data(config: Dict) -> pd.DataFrame:
         end_time=end_time,
         freq='day'
     )
-    
+    print(
+        f"  [2/2] Features loaded in {time.time() - t1:.1f}s, rows={len(df)}",
+        flush=True,
+    )
+
     df.columns = fields
-    
+
+    print(f"  Stock data ready in {time.time() - t0:.1f}s", flush=True)
     logger.debug(f"Loaded stock data: {len(df)} rows")
-    
+
     return df
 
 
