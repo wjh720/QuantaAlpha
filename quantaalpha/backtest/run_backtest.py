@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Backtest entry script. Usage:
-  quantaalpha backtest --factor-source alpha158_20
+  quantaalpha backtest --factor-source alpha158
   quantaalpha backtest --factor-source custom --factor-json /path/to/factors.json
-  python -m quantaalpha.backtest.run_backtest -c configs/backtest.yaml --factor-source alpha158_20
+  python -m quantaalpha.backtest.run_backtest -c configs/backtest.yaml --factor-source alpha158
 """
 
 import argparse
@@ -38,7 +38,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run_backtest.py -c config.yaml --factor-source alpha158_20
+  python run_backtest.py -c config.yaml --factor-source alpha158
   python run_backtest.py -c config.yaml --factor-source custom --factor-json /path/to/factors.json
   python run_backtest.py -c config.yaml --factor-source combined --factor-json f1.json --factor-json f2.json
         """
@@ -116,4 +116,3 @@ Examples:
 
 if __name__ == '__main__':
     main()
-
