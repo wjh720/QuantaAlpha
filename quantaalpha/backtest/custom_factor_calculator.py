@@ -162,55 +162,50 @@ class CustomFactorCalculator:
         level0 = index.get_level_values(0)
         level1 = index.get_level_values(1)
 
-        def _datetime_parse_ratio(values: pd.Index) -> tuple[float, Optional[pd.Index]]:
+        def _looks_like_datetime_level(values: pd.Index) -> bool:
             if is_datetime64_any_dtype(values):
-                return 1.0, values
+                return True
             if len(values) == 0:
-                return 0.0, None
+                return False
+
+            sample = pd.Index(values).dropna().unique()[:20]
+            if len(sample) == 0:
+                return False
+
             try:
-                parsed = pd.to_datetime(values, errors="coerce")
+                parsed = pd.to_datetime(sample, errors="coerce")
             except Exception:
-                return 0.0, None
-            ratio = float(pd.Series(parsed).notna().mean())
-            return ratio, parsed
+                return False
 
-        ratio0, parsed0 = _datetime_parse_ratio(level0)
-        ratio1, parsed1 = _datetime_parse_ratio(level1)
+            return parsed.notna().mean() >= 0.8
 
-        if names == ['instrument', 'datetime']:
-            dt_level = level1
-            inst_level = level0
-            parsed_dt = parsed1
-        elif names == ['datetime', 'instrument']:
-            dt_level = level0
-            inst_level = level1
-            parsed_dt = parsed0
-        elif ratio1 > ratio0:
-            dt_level = level1
-            inst_level = level0
-            parsed_dt = parsed1
-        else:
-            dt_level = level0
-            inst_level = level1
-            parsed_dt = parsed0
+        level0_is_dt = _looks_like_datetime_level(level0)
+        level1_is_dt = _looks_like_datetime_level(level1)
 
-        best_ratio = max(ratio0, ratio1)
-        if best_ratio < 0.8:
+        # Cached H5 files may have unnamed reversed MultiIndex: (instrument, datetime).
+        if (names == ['instrument', 'datetime']) or (not level0_is_dt and level1_is_dt):
+            index = index.swaplevel()
+            names = list(index.names)
+            level0 = index.get_level_values(0)
+            level1 = index.get_level_values(1)
+            level0_is_dt = _looks_like_datetime_level(level0)
+
+        # Normalize datetime level dtype when stored as object/string.
+        if not level0_is_dt:
             raise ValueError(
                 f"Failed to identify datetime level in cached index names={names}, "
                 f"sample_level0={list(pd.Index(level0).dropna().unique()[:3])}, "
                 f"sample_level1={list(pd.Index(level1).dropna().unique()[:3])}"
             )
 
-        if parsed_dt is None or not is_datetime64_any_dtype(dt_level):
+        if not is_datetime64_any_dtype(level0):
             try:
-                dt_level = pd.to_datetime(dt_level, errors="coerce")
+                dt_level = pd.to_datetime(level0)
+                index = pd.MultiIndex.from_arrays([dt_level, level1], names=['datetime', 'instrument'])
             except Exception:
-                pass
+                index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
         else:
-            dt_level = parsed_dt
-
-        index = pd.MultiIndex.from_arrays([dt_level, inst_level], names=['datetime', 'instrument'])
+            index = pd.MultiIndex.from_arrays([level0, level1], names=['datetime', 'instrument'])
 
         return index
     
