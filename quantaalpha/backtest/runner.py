@@ -306,12 +306,49 @@ class BacktestRunner:
         long_hold_return.name = "daily_long_hold_return"
         return long_hold_return.sort_index()
 
+    def _save_long_hold_positions_parquet(
+        self,
+        positions: Dict,
+        pred: Optional[pd.Series],
+        output_dir: Path,
+        file_prefix: str,
+    ) -> Optional[Path]:
+        """Save actual long holdings by day to parquet."""
+        from qlib.contrib.report.analysis_position.parse_position import parse_position
+
+        position_df = parse_position(positions)
+        position_df = self._normalize_datetime_instrument_index(position_df)
+        position_df = position_df[position_df["status"] != -1].copy()
+        if position_df.empty:
+            return None
+
+        if pred is not None:
+            pred_series = pred.copy()
+            if isinstance(pred_series, pd.DataFrame):
+                pred_series = pred_series.iloc[:, 0]
+            pred_series.name = "model_ret"
+            pred_df = pred_series.to_frame()
+            pred_df = self._normalize_datetime_instrument_index(pred_df)
+            position_df = position_df.join(pred_df, how="left")
+
+        position_df = position_df.reset_index()
+        position_df = position_df.rename(columns={"datetime": "date"})
+        position_df = position_df[
+            ["date", "instrument", "weight", "amount", "price", "count", "status", "cash", "model_ret"]
+        ].sort_values(["date", "weight", "instrument"], ascending=[True, False, True])
+
+        parquet_path = output_dir / f"{file_prefix}_long_positions.parquet"
+        position_df.to_parquet(parquet_path, index=False, engine="pyarrow")
+        logger.debug(f"  Long holdings parquet saved: {parquet_path}")
+        return parquet_path
+
     def _save_backtest_curves(
         self,
         report_df: pd.DataFrame,
         output_dir: Path,
         file_prefix: str,
         positions: Optional[Dict] = None,
+        pred: Optional[pd.Series] = None,
     ) -> None:
         """Save backtest CSV and a comparison plot including long-book CRP."""
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +368,7 @@ class BacktestRunner:
         save_df["cumulative_excess_return"] = excess_return.cumsum()
 
         if positions:
+            parquet_path = self._save_long_hold_positions_parquet(positions, pred, output_dir, file_prefix)
             long_hold_return = self._compute_long_hold_daily_return(
                 positions,
                 start_time=self.config["backtest"]["backtest"]["start_time"],
@@ -340,6 +378,19 @@ class BacktestRunner:
             if "daily_long_hold_return" in save_df.columns:
                 save_df["daily_long_hold_return"] = save_df["daily_long_hold_return"].fillna(0)
                 save_df["long_hold_crp"] = (1 + save_df["daily_long_hold_return"]).cumprod() - 1
+            if parquet_path is not None:
+                try:
+                    from quantaalpha.backtest.plot_long_asset_curves import run_plot_long_asset_curves
+
+                    plot_output_dir = run_plot_long_asset_curves(
+                        positions_parquet=parquet_path,
+                        config_path=self.config_path,
+                        output_dir=parquet_path.with_suffix(""),
+                        n_procs=100,
+                    )
+                    logger.debug(f"  Asset curve plots saved: {plot_output_dir}")
+                except Exception as plot_asset_err:
+                    logger.warning(f"Failed to save per-asset long plots: {plot_asset_err}")
 
         save_df.index.name = "date"
         csv_path = output_dir / f"{file_prefix}_cumulative_excess.csv"
@@ -803,7 +854,7 @@ class BacktestRunner:
                             try:
                                 output_dir = Path(self.config['experiment'].get('output_dir', './backtest_v2_results'))
                                 file_prefix = output_name if output_name else exp_name
-                                self._save_backtest_curves(report_df, output_dir, file_prefix, positions_df)
+                                self._save_backtest_curves(report_df, output_dir, file_prefix, positions_df, pred)
                             except Exception as csv_err:
                                 logger.warning(f"Failed to save daily CSV: {csv_err}")
 
