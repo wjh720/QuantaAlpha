@@ -57,39 +57,47 @@ def _get_market_assets(market: str, start_date, end_date) -> set[str]:
     )
 
 
-def _get_market_membership_df(market: str, start_date, end_date) -> pd.DataFrame:
+def _get_market_instrument_spans(market: str, start_date, end_date) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
     from qlib.data import D
 
     _ensure_qlib_initialized()
 
-    market_weight = D.features(
-        D.instruments("all"),
-        [f"${market}_weight"],
+    instruments = D.instruments(market)
+    instrument_spans = D.list_instruments(
+        instruments,
         start_time=start_date,
         end_time=end_date,
-        freq="day",
+        as_list=False,
     )
-    market_weight.columns = ["market_weight"]
-    membership_df = market_weight.reset_index()
-    membership_df["in_market"] = membership_df["market_weight"].fillna(0) > 0
-    return membership_df[["datetime", "instrument", "in_market"]]
+    return {
+        instrument: [(pd.Timestamp(start), pd.Timestamp(end)) for start, end in spans]
+        for instrument, spans in instrument_spans.items()
+    }
 
 
 def _zero_returns_outside_market(detail_df: pd.DataFrame, market: str) -> pd.DataFrame:
     if detail_df.empty:
         return detail_df
 
-    membership_df = _get_market_membership_df(
+    instrument_spans = _get_market_instrument_spans(
         market=market,
         start_date=detail_df["datetime"].min(),
         end_date=detail_df["datetime"].max(),
     )
-    adjusted_df = detail_df.merge(membership_df, on=["datetime", "instrument"], how="left")
-    adjusted_df["in_market"] = adjusted_df["in_market"].fillna(False)
-    outside_mask = ~adjusted_df["in_market"]
+    adjusted_df = detail_df.copy()
+
+    def _in_market(row: pd.Series) -> bool:
+        spans = instrument_spans.get(row["instrument"])
+        if not spans:
+            return False
+        dt = pd.Timestamp(row["datetime"])
+        return any(start <= dt <= end for start, end in spans)
+
+    in_market_mask = adjusted_df.apply(_in_market, axis=1)
+    outside_mask = ~in_market_mask
     adjusted_df.loc[outside_mask, "asset_ret"] = 0
     adjusted_df.loc[outside_mask, "model_trade_ret"] = 0
-    return adjusted_df.drop(columns=["in_market"])
+    return adjusted_df
 
 
 def _sanitize_filename(name: str) -> str:
@@ -272,7 +280,6 @@ def plot_asset_curves_parallel(
     detail_df: pd.DataFrame,
     output_dir: Path,
     n_jobs: int = 100,
-    allowed_assets: set[str] | None = None,
 ) -> list[Path]:
     """Plot per-asset curves in parallel."""
     if detail_df.empty:
@@ -281,8 +288,6 @@ def plot_asset_curves_parallel(
     output_dir.mkdir(parents=True, exist_ok=True)
     grouped_frames = []
     for asset, asset_df in detail_df.groupby("instrument", sort=True):
-        if allowed_assets is not None and asset not in allowed_assets:
-            continue
         grouped_frames.append((asset, asset_df.copy(), str(output_dir)))
     if not grouped_frames:
         return []
@@ -373,21 +378,12 @@ def plot_saved_asset_trade_outputs(
     detail_df = pd.read_parquet(paths["detail_parquet"])
     detail_df = _zero_returns_outside_market(detail_df, market=market)
     daily_df = build_daily_summary(detail_df)
-    allowed_assets = _get_market_assets(
-        market=market,
-        start_date=detail_df["datetime"].min(),
-        end_date=detail_df["datetime"].max(),
-    )
-    skipped_assets = sorted(set(detail_df["instrument"].unique()) - allowed_assets)
-    if skipped_assets:
-        logger.info("Skip %d assets outside %s", len(skipped_assets), market)
 
     plot_overall_curves(daily_df, paths["overall_plot"])
     plot_asset_curves_parallel(
         detail_df,
         paths["asset_plot_dir"],
         n_jobs=n_jobs,
-        allowed_assets=allowed_assets,
     )
 
     return {
