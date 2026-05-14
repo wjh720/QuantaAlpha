@@ -11,10 +11,13 @@ import math
 import re
 import argparse
 import os
+import bisect
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from zipfile import ZipFile
 
 import matplotlib
+import numpy as np
 import pandas as pd
 
 from qlib.contrib.report.analysis_position.parse_position import get_position_data
@@ -29,50 +32,105 @@ def _cumsum_return(series: pd.Series) -> pd.Series:
     return series.fillna(0).cumsum()
 
 
-def _ensure_qlib_initialized() -> None:
-    import qlib
+def _resolve_provider_uri() -> Path:
+    candidates = [
+        os.environ.get("QLIB_DATA_DIR"),
+        os.environ.get("QLIB_PROVIDER_URI"),
+        str(Path(__file__).resolve().parents[2] / "hf_data" / "cn_data.zip"),
+        str(Path(__file__).resolve().parents[2] / "hf_data" / "cn_data"),
+        "~/.qlib/qlib_data/cn_data",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate).expanduser()
+        if path.exists():
+            return path
+    raise FileNotFoundError("Qlib provider data not found in env vars, hf_data/, or ~/.qlib/qlib_data")
 
-    provider_uri = os.environ.get("QLIB_DATA_DIR") or os.environ.get("QLIB_PROVIDER_URI") or "~/.qlib/qlib_data/cn_data"
-    provider_uri = os.path.expanduser(provider_uri)
-    qlib.init(
-        provider_uri=provider_uri,
-        region="cn",
-        clear_mem_cache=False,
+
+def _read_provider_text_lines(provider_uri: Path, relative_path: str) -> list[str]:
+    if provider_uri.is_file() and provider_uri.suffix == ".zip":
+        member_path = f"cn_data/{relative_path}"
+        with ZipFile(provider_uri) as zf:
+            return zf.read(member_path).decode("utf-8").splitlines()
+    file_path = provider_uri / relative_path
+    return file_path.read_text(encoding="utf-8").splitlines()
+
+
+def _read_provider_bin_series(provider_uri: Path, relative_path: str, start_index: int, end_index: int) -> pd.Series:
+    if provider_uri.is_file() and provider_uri.suffix == ".zip":
+        member_path = f"cn_data/{relative_path}"
+        with ZipFile(provider_uri) as zf:
+            raw = zf.read(member_path)
+    else:
+        raw = (provider_uri / relative_path).read_bytes()
+
+    ref_start_index = int(np.frombuffer(raw[:4], dtype="<f4")[0])
+    si = max(ref_start_index, start_index)
+    if si > end_index:
+        return pd.Series(dtype=np.float32)
+    offset = 4 * (si - ref_start_index) + 4
+    count = end_index - si + 1
+    data = np.frombuffer(raw[offset : offset + 4 * count], dtype="<f4")
+    return pd.Series(data, index=pd.RangeIndex(si, si + len(data)))
+
+
+def _load_benchmark_return_series(
+    benchmark_code: str,
+    start_date,
+    end_date,
+    field: str = "change",
+) -> pd.Series:
+    provider_uri = _resolve_provider_uri()
+    calendar_lines = _read_provider_text_lines(provider_uri, "calendars/day.txt")
+    calendar = pd.to_datetime(pd.Series(calendar_lines, dtype="string"))
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    start_idx = bisect.bisect_left(calendar.tolist(), start_ts)
+    end_idx = bisect.bisect_right(calendar.tolist(), end_ts) - 1
+    if start_idx > end_idx:
+        return pd.Series(dtype=np.float32)
+
+    feature_path = f"features/{benchmark_code.lower()}/{field}.day.bin"
+    series = _read_provider_bin_series(provider_uri, feature_path, start_idx, end_idx)
+    if series.empty:
+        return pd.Series(dtype=np.float32)
+    series.index = calendar.iloc[series.index].to_list()
+    return pd.Series(series.values, index=pd.DatetimeIndex(series.index), name="bench_ret")
+
+
+def _ensure_bench_ret(detail_df: pd.DataFrame, benchmark_code: str = "SH000300") -> pd.DataFrame:
+    if "bench_ret" in detail_df.columns:
+        return detail_df
+
+    bench_ret = _load_benchmark_return_series(
+        benchmark_code=benchmark_code,
+        start_date=detail_df["datetime"].min(),
+        end_date=detail_df["datetime"].max(),
     )
-
-
-def _get_market_assets(market: str, start_date, end_date) -> set[str]:
-    from qlib.data import D
-
-    _ensure_qlib_initialized()
-
-    instruments = D.instruments(market)
-    return set(
-        D.list_instruments(
-            instruments,
-            start_time=start_date,
-            end_time=end_date,
-            as_list=True,
-        )
-    )
+    bench_df = bench_ret.rename_axis("datetime").reset_index()
+    return detail_df.merge(bench_df, on="datetime", how="left")
 
 
 def _get_market_instrument_spans(market: str, start_date, end_date) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
-    from qlib.data import D
+    provider_uri = _resolve_provider_uri()
+    instrument_file = f"{market}.txt"
+    lines = _read_provider_text_lines(provider_uri, f"instruments/{instrument_file}")
 
-    _ensure_qlib_initialized()
-
-    instruments = D.instruments(market)
-    instrument_spans = D.list_instruments(
-        instruments,
-        start_time=start_date,
-        end_time=end_date,
-        as_list=False,
-    )
-    return {
-        instrument: [(pd.Timestamp(start), pd.Timestamp(end)) for start, end in spans]
-        for instrument, spans in instrument_spans.items()
-    }
+    clipped_spans: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    for line in lines:
+        if not line.strip():
+            continue
+        instrument, span_start, span_end = line.split("\t")
+        span_start_ts = max(start_ts, pd.Timestamp(span_start))
+        span_end_ts = min(end_ts, pd.Timestamp(span_end))
+        if span_start_ts > span_end_ts:
+            continue
+        clipped_spans.setdefault(instrument, []).append((span_start_ts, span_end_ts))
+    return clipped_spans
 
 
 def _zero_returns_outside_market(detail_df: pd.DataFrame, market: str) -> pd.DataFrame:
@@ -117,9 +175,11 @@ def build_asset_trade_detail(position: dict, report_df: pd.DataFrame, label_data
     traded_assets = sorted(position_df["instrument"].dropna().unique())
     asset_panel = label_data.loc[label_data.index.get_level_values("instrument").isin(traded_assets)].reset_index()
     asset_panel = asset_panel.rename(columns={"label": "asset_ret"})
+    bench_df = report_df[["bench"]].reset_index().rename(columns={"index": "datetime", "bench": "bench_ret"})
 
     position_df = position_df.drop(columns=["label"], errors="ignore")
     detail_df = asset_panel.merge(position_df, on=["instrument", "datetime"], how="left")
+    detail_df = detail_df.merge(bench_df, on="datetime", how="left")
     detail_df["weight"] = detail_df["weight"].fillna(0)
     detail_df["status"] = detail_df["status"].fillna(0)
     detail_df["model_trade_ret"] = detail_df["asset_ret"].fillna(0) * detail_df["weight"]
@@ -137,10 +197,12 @@ def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
         held_mask = day_df["is_held"]
         held_ret = day_df.loc[held_mask, "asset_ret"]
         traded_asset_ret = held_ret.mean() if len(held_ret) > 0 else 0.0
+        bench_ret = day_df["bench_ret"].dropna().iloc[0] if day_df["bench_ret"].notna().any() else 0.0
         return pd.Series(
             {
                 "model_ret": day_df["model_trade_ret"].sum(),
                 "traded_asset_ret": traded_asset_ret,
+                "bench_ret": bench_ret,
                 "held_asset_count": int(held_mask.sum()),
                 "held_weight_sum": day_df.loc[held_mask, "weight"].sum(),
             }
@@ -149,6 +211,7 @@ def build_daily_summary(detail_df: pd.DataFrame) -> pd.DataFrame:
     daily_df = detail_df.groupby("datetime", sort=True, group_keys=False).apply(_agg_day).reset_index()
     daily_df["cum_model_ret"] = _cumsum_return(daily_df["model_ret"])
     daily_df["cum_traded_asset_ret"] = _cumsum_return(daily_df["traded_asset_ret"])
+    daily_df["cum_bench_ret"] = _cumsum_return(daily_df["bench_ret"])
     return daily_df
 
 
@@ -189,12 +252,12 @@ def plot_overall_curves(daily_df: pd.DataFrame, output_path: Path) -> None:
     ax.plot(daily_df["datetime"], daily_df["cum_model_ret"], label="Model cumulative ret", linewidth=2.2)
     ax.plot(
         daily_df["datetime"],
-        daily_df["cum_traded_asset_ret"],
-        label="Held assets cumulative ret",
+        daily_df["cum_bench_ret"],
+        label="CSI300 cumulative ret",
         linewidth=1.8,
         alpha=0.9,
     )
-    ax.set_title("Model vs Held Assets Cumulative Return")
+    ax.set_title("Model vs CSI300 Cumulative Return")
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Return")
     ax.grid(True, alpha=0.25)
@@ -296,8 +359,19 @@ def plot_asset_curves_parallel(
     if max_workers == 1:
         return [Path(_plot_single_asset(item)) for item in grouped_frames]
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        return [Path(path) for path in executor.map(_plot_single_asset, grouped_frames, chunksize=max(1, math.ceil(len(grouped_frames) / max_workers)))]
+    try:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            return [
+                Path(path)
+                for path in executor.map(
+                    _plot_single_asset,
+                    grouped_frames,
+                    chunksize=max(1, math.ceil(len(grouped_frames) / max_workers)),
+                )
+            ]
+    except PermissionError:
+        logger.warning("ProcessPoolExecutor unavailable in current environment, falling back to single-process plotting")
+        return [Path(_plot_single_asset(item)) for item in grouped_frames]
 
 
 def save_asset_trade_outputs(
@@ -376,6 +450,7 @@ def plot_saved_asset_trade_outputs(
     paths = _asset_trade_paths(output_dir, file_prefix)
     daily_df = pd.read_parquet(paths["daily_parquet"])
     detail_df = pd.read_parquet(paths["detail_parquet"])
+    detail_df = _ensure_bench_ret(detail_df)
     detail_df = _zero_returns_outside_market(detail_df, market=market)
     daily_df = build_daily_summary(detail_df)
 
